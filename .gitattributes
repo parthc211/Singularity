@@ -1,0 +1,19 @@
+# Normalize line endings: store text as LF in the repo, check out native on each OS.
+* text=auto
+
+# Explicitly treat these as text.
+*.h    text
+*.cpp  text
+*.hlsl text
+*.md   text
+*.txt  text
+*.cmake text
+CMakeLists.txt text
+
+# Wavefront OBJ models are text.
+*.obj  text
+
+# Binary assets — never touch line endings.
+*.png  binary
+*.jpg  binary
+*.dds  binary

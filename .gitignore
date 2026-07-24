@@ -1,0 +1,46 @@
+# ---- Build output ----
+build/
+cmake-build-debug/
+cmake-build-release/
+out/
+bin/
+lib/
+
+# ---- CMake ----
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+*.cmake.state
+_deps/
+
+# ---- Visual Studio ----
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.aps
+*.pch
+*.pdb
+*.ipch
+*.ilk
+*.exp
+*.idb
+*.lib
+*.dll
+*.exe
+# NOTE: compiled .obj files live under build/ (already ignored); we deliberately
+# do NOT ignore *.obj globally so Wavefront model assets (Assets/*.obj) are tracked.
+
+# ---- IDE (personal, machine-specific) ----
+.idea/
+.vscode/
+
+# ---- Misc ----
+files/
+*.log
+Thumbs.db
+.DS_Store

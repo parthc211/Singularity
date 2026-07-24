@@ -1,0 +1,43 @@
+# cube.obj — unit cube centred at the origin
+# 8 positions, 6 normals, 4 UVs, 12 triangles
+# Winding: clockwise (Direct3D FrontCounterClockwise = FALSE)
+
+v -0.5 -0.5 -0.5
+v  0.5 -0.5 -0.5
+v  0.5  0.5 -0.5
+v -0.5  0.5 -0.5
+v -0.5 -0.5  0.5
+v  0.5 -0.5  0.5
+v  0.5  0.5  0.5
+v -0.5  0.5  0.5
+
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+
+vn  0.0  0.0 -1.0
+vn  0.0  0.0  1.0
+vn -1.0  0.0  0.0
+vn  1.0  0.0  0.0
+vn  0.0 -1.0  0.0
+vn  0.0  1.0  0.0
+
+# Front face  (-Z normal)
+f 1/1/1 4/4/1 3/3/1
+f 1/1/1 3/3/1 2/2/1
+# Back face   (+Z normal)
+f 5/1/2 6/2/2 7/3/2
+f 5/1/2 7/3/2 8/4/2
+# Left face   (-X normal)
+f 1/1/3 5/2/3 8/3/3
+f 1/1/3 8/3/3 4/4/3
+# Right face  (+X normal)
+f 2/1/4 3/2/4 7/3/4
+f 2/1/4 7/3/4 6/4/4
+# Bottom face (-Y normal)
+f 1/1/5 2/2/5 6/3/5
+f 1/1/5 6/3/5 5/4/5
+# Top face    (+Y normal)
+f 4/1/6 8/2/6 7/3/6
+f 4/1/6 7/3/6 3/4/6
