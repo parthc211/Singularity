@@ -85,10 +85,14 @@ add_library(SingularityEngine STATIC
     src/Renderer/DX12/VertexBuffer.cpp
     src/Renderer/DX12/IndexBuffer.h
     src/Renderer/DX12/IndexBuffer.cpp
+    src/Renderer/DX12/Texture2D.h
+    src/Renderer/DX12/Texture2D.cpp
     src/Renderer/Mesh.h
     src/Renderer/Mesh.cpp
     src/Renderer/MeshLoader.h
     src/Renderer/MeshLoader.cpp
+    src/Renderer/ImageLoader.h
+    src/Renderer/ImageLoader.cpp
     src/Renderer/Renderer.h
     src/Renderer/Renderer.cpp
     src/UI/ImGuiLayer.h
@@ -103,6 +107,8 @@ target_link_libraries(SingularityEngine PUBLIC
     d3dcompiler.lib
     dxguid.lib
     xinput.lib
+    windowscodecs.lib
+    ole32.lib
     imgui
 )
 

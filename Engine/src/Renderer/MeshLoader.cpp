@@ -7,6 +7,7 @@
 #include <array>
 #include <vector>
 #include <unordered_map>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -160,7 +161,90 @@ bool LoadOBJ(const char*              path,
         return false;
     }
 
+    // Without UVs there is no tangent space to derive; leave tangents zeroed.
+    if (!uvs.empty())
+        ComputeTangents(outVertices, outIndices);
+
     return true;
+}
+
+// --- tangent generation --------------------------------------------------------
+
+namespace {
+struct F3 { float x, y, z; };
+
+F3    operator+(F3 a, F3 b)  { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+F3    operator-(F3 a, F3 b)  { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+F3    operator*(F3 a, float s) { return { a.x * s, a.y * s, a.z * s }; }
+float Dot(F3 a, F3 b)        { return a.x * b.x + a.y * b.y + a.z * b.z; }
+F3    Cross(F3 a, F3 b)      { return { a.y * b.z - a.z * b.y,
+                                        a.z * b.x - a.x * b.z,
+                                        a.x * b.y - a.y * b.x }; }
+float Len(F3 a)              { return std::sqrt(Dot(a, a)); }
+F3    LoadF3(const float* p) { return { p[0], p[1], p[2] }; }
+} // namespace
+
+void ComputeTangents(std::vector<MeshVertex>&     vertices,
+                     const std::vector<uint32_t>& indices)
+{
+    // Accumulators: unnormalized per-vertex tangent and bitangent sums. Larger
+    // triangles contribute proportionally more (the un-normalized per-triangle
+    // vectors scale with area), which is the weighting we want.
+    std::vector<F3> tanAcc(vertices.size(), { 0, 0, 0 });
+    std::vector<F3> bitAcc(vertices.size(), { 0, 0, 0 });
+
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const uint32_t i0 = indices[i], i1 = indices[i + 1], i2 = indices[i + 2];
+        const MeshVertex& v0 = vertices[i0];
+        const MeshVertex& v1 = vertices[i1];
+        const MeshVertex& v2 = vertices[i2];
+
+        const F3 e1 = LoadF3(v1.position) - LoadF3(v0.position);
+        const F3 e2 = LoadF3(v2.position) - LoadF3(v0.position);
+
+        const float du1 = v1.texCoord[0] - v0.texCoord[0];
+        const float dv1 = v1.texCoord[1] - v0.texCoord[1];
+        const float du2 = v2.texCoord[0] - v0.texCoord[0];
+        const float dv2 = v2.texCoord[1] - v0.texCoord[1];
+
+        // Solve [e1; e2] = [du1 dv1; du2 dv2] * [T; B] for T and B.
+        const float det = du1 * dv2 - du2 * dv1;
+        if (std::fabs(det) < 1e-12f) continue;  // degenerate UV mapping
+        const float r = 1.0f / det;
+
+        const F3 t = (e1 * dv2 - e2 * dv1) * r;
+        const F3 b = (e2 * du1 - e1 * du2) * r;
+
+        for (uint32_t idx : { i0, i1, i2 }) {
+            tanAcc[idx] = tanAcc[idx] + t;
+            bitAcc[idx] = bitAcc[idx] + b;
+        }
+    }
+
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        MeshVertex& v = vertices[i];
+        const F3 n = LoadF3(v.normal);
+        // Gram-Schmidt: remove the normal component, keeping T in the surface plane.
+        F3 t = tanAcc[i] - n * Dot(n, tanAcc[i]);
+
+        float len = Len(t);
+        if (len < 1e-8f) {
+            // No usable UV-derived tangent (unreferenced vertex, degenerate UVs,
+            // or T parallel to N). Build one perpendicular to the normal from
+            // the world axis least aligned with it.
+            const F3 axis = (std::fabs(n.x) < 0.9f) ? F3{ 1, 0, 0 } : F3{ 0, 1, 0 };
+            t   = Cross(n, axis);
+            len = Len(t);
+            if (len < 1e-8f) { t = { 1, 0, 0 }; len = 1.0f; } // zero normal too
+        }
+        t = t * (1.0f / len);
+
+        v.tangent[0] = t.x;
+        v.tangent[1] = t.y;
+        v.tangent[2] = t.z;
+        // Handedness: does the accumulated bitangent agree with cross(N, T)?
+        v.tangent[3] = (Dot(Cross(n, t), bitAcc[i]) < 0.0f) ? -1.0f : 1.0f;
+    }
 }
 
 } // namespace SGE

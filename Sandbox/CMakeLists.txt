@@ -20,6 +20,8 @@ add_executable(Sandbox WIN32
     Scenes/BloomScene.cpp
     Scenes/SsaoScene.h
     Scenes/SsaoScene.cpp
+    Scenes/NormalMapScene.h
+    Scenes/NormalMapScene.cpp
     Scenes/CsmScene.h
     Scenes/CsmScene.cpp
     Scenes/JobScene.h

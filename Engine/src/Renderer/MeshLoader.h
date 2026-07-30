@@ -17,8 +17,19 @@ namespace SGE {
 //   - Missing normals or UVs in a face vertex produce zero-valued fields.
 //
 // Returns false if the file cannot be opened or contains no geometry.
+//   - Tangents are computed automatically (ComputeTangents) when the file has UVs.
 bool LoadOBJ(const char*               path,
              std::vector<MeshVertex>&  outVertices,
              std::vector<uint32_t>&    outIndices);
+
+// Fills each vertex's tangent from its position/normal/texCoord and the triangle
+// list (Lengyel's method): per-triangle tangents/bitangents from UV deltas are
+// area-accumulated per vertex, then Gram-Schmidt-orthogonalized against the
+// normal; w stores the handedness (±1) so shaders can rebuild the bitangent as
+// cross(N, T) * w. Triangles with degenerate UVs contribute nothing; vertices
+// that end up with no usable tangent get an arbitrary one perpendicular to
+// their normal (flat normal maps still shade correctly there).
+void ComputeTangents(std::vector<MeshVertex>&     vertices,
+                     const std::vector<uint32_t>& indices);
 
 } // namespace SGE

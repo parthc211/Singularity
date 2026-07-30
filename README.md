@@ -8,7 +8,7 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **14 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **15 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
@@ -21,6 +21,7 @@ The Sandbox app is a single executable hosting **14 interactive demos**, selecta
 | **Shadow Mapping** | Directional shadow map with hardware PCF (comparison sampler) |
 | **HDR + Bloom** | HDR render target → bright-pass → separable Gaussian blur → ACES tonemap |
 | **SSAO** | Screen-space ambient occlusion over the deferred G-buffer |
+| **Texture / Normal Mapping** | sRGB albedo + tangent-space normal maps via a per-vertex TBN basis (tangents baked by the OBJ loader), CPU-mipped WIC textures with a procedural brick fallback |
 | **Cascaded Shadow Maps** | 4-cascade CSM with bounding-sphere fit + texel snapping (stable, shimmer-free) |
 | **Job System** | Work-stealing thread pool recording DX12 command lists in parallel, with a single/multi A/B toggle |
 | **Physics: Stacks & Rain** | Hand-written rigid-body solver — stable 10-box stacks, body rain, live tunables, contact overlay |
@@ -28,7 +29,7 @@ The Sandbox app is a single executable hosting **14 interactive demos**, selecta
 
 ## Engine systems
 
-- **Renderer (DX12):** device/swap-chain/command-context bootstrap, root signatures, PSO management (MRT + tessellation capable), depth buffers, and reusable render-target helpers (`GBuffer`, `ShadowMap`, `CascadedShadowMap`, `RenderTexture`).
+- **Renderer (DX12):** device/swap-chain/command-context bootstrap, root signatures, PSO management (MRT + tessellation capable), depth buffers, reusable render-target helpers (`GBuffer`, `ShadowMap`, `CascadedShadowMap`, `RenderTexture`), and sampled textures (`Texture2D`: WIC decoding, sRGB-aware CPU mip generation, staged DEFAULT-heap upload).
 - **Shaders:** compiled at runtime with **DXC** (SM 6.0); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
@@ -71,14 +72,14 @@ Singularity/
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 14 demo scenes
+    ├── Scenes/         # the 15 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post)
     └── Assets/         # cube.obj
 ```
 
 ## Roadmap
 
-**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints).
+**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents).
 
 **Next:** a renderer abstraction layer · portfolio polish.
 

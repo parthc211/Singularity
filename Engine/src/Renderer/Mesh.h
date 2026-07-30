@@ -9,11 +9,18 @@
 
 namespace SGE {
 
+// Field order matters: input layouts are reflected from each VS with
+// D3D12_APPEND_ALIGNED_ELEMENT, so a shader's inputs must be a prefix of this
+// struct in this order (POSITION, NORMAL, TEXCOORD, TANGENT). Appending new
+// fields at the END is always safe — old shaders read their prefix and the
+// grown stride skips the rest.
 struct MeshVertex
 {
     float position[3];
     float normal[3];
     float texCoord[2];
+    float tangent[4];   // xyz = unit tangent (+U direction), w = handedness (±1):
+                        // bitangent = cross(normal, tangent) * w
 };
 
 // Owns a VertexBuffer + IndexBuffer pair uploaded once to the GPU.

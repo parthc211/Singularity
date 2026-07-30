@@ -167,6 +167,11 @@ ID3D12GraphicsCommandList* Renderer::GetCommandList() const
     return m_commandContext.GetCommandList();
 }
 
+ID3D12CommandQueue* Renderer::GetCommandQueue() const
+{
+    return m_graphicsDevice.GetCommandQueue();
+}
+
 void Renderer::Shutdown()
 {
     WaitForGPU();

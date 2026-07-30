@@ -33,8 +33,10 @@ public:
 
     void OnResize(uint32_t width, uint32_t height);
 
-    ID3D12Device*              GetDevice()      const;
-    ID3D12GraphicsCommandList* GetCommandList() const;
+    ID3D12Device*              GetDevice()       const;
+    ID3D12GraphicsCommandList* GetCommandList()  const;
+    // The single direct queue — needed by Texture2D's blocking staging upload.
+    ID3D12CommandQueue*        GetCommandQueue() const;
     uint32_t                   GetFrameIndex()  const { return m_frameIndex; }
 
     // Shared UPLOAD-type heap that static mesh VB/IB sub-allocate placed resources

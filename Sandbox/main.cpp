@@ -20,6 +20,7 @@
 #include "Scenes/ShadowScene.h"
 #include "Scenes/BloomScene.h"
 #include "Scenes/SsaoScene.h"
+#include "Scenes/NormalMapScene.h"
 #include "Scenes/CsmScene.h"
 #include "Scenes/JobScene.h"
 #include "Scenes/PhysicsScene.h"
@@ -52,6 +53,14 @@ static void BuildUvSphere(std::vector<SGE::MeshVertex>& verts,
             v.normal[0]   = x; v.normal[1]   = y; v.normal[2]   = z;
             v.texCoord[0] = float(s) / float(slices);
             v.texCoord[1] = float(r) / float(stacks);
+            // Analytic tangent: normalize(dP/dtheta) = (-sin, 0, cos)theta — the
+            // +U direction. dP/dphi (the +V direction) equals cross(N, T) exactly,
+            // so handedness is +1. Well-defined even at the poles, where each
+            // duplicated pole vertex keeps its own theta.
+            v.tangent[0] = -std::sin(theta);
+            v.tangent[1] = 0.0f;
+            v.tangent[2] = std::cos(theta);
+            v.tangent[3] = 1.0f;
             verts.push_back(v);
         }
     }
@@ -130,6 +139,7 @@ protected:
         m_scenes.Add(std::make_unique<ShadowScene>(&m_mesh));
         m_scenes.Add(std::make_unique<BloomScene>(&m_mesh));
         m_scenes.Add(std::make_unique<SsaoScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<NormalMapScene>(&m_mesh));
         m_scenes.Add(std::make_unique<CsmScene>(&m_mesh));
         m_scenes.Add(std::make_unique<JobScene>(&m_mesh));
         m_scenes.Add(std::make_unique<PhysicsScene>(&m_mesh, &m_sphereMesh));

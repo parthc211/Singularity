@@ -1,0 +1,358 @@
+#include "Scenes/NormalMapScene.h"
+
+#include "Core/Camera.h"
+#include "Core/Logger.h"
+#include "Renderer/Renderer.h"
+#include "Renderer/Mesh.h"
+#include "Renderer/DX12/DynamicUploadBuffer.h"
+
+#include "imgui.h"
+#include <cmath>
+#include <cstring>
+#include <filesystem>
+
+using namespace SGE;
+using namespace DirectX;
+
+namespace {
+
+// Must match the cbuffers in NormalMap.hlsl.
+struct ObjCB {
+    XMFLOAT4X4 MVP;
+    XMFLOAT4X4 Model;
+    XMFLOAT4   UvTiling;
+};
+struct FrameCB {
+    XMFLOAT4 LightDir;
+    XMFLOAT4 CameraPos;
+    float    NormalStrength;
+    int      UseNormalMap;
+    int      FlipGreen;
+    int      ViewMode;
+    int      GammaCorrect;
+    float    _pad[3];
+};
+
+XMVECTOR ComputeLightDir(float elevationDeg, float azimuth) {
+    const float el = XMConvertToRadians(elevationDeg);
+    return XMVector3Normalize(XMVectorSet(cosf(el) * cosf(azimuth), -sinf(el),
+                                          cosf(el) * sinf(azimuth), 0.0f));
+}
+
+// --- procedural brick textures ------------------------------------------------
+// A periodic brick height field (bevelled bricks, recessed mortar, hashed
+// per-brick variation) drives both maps: the albedo colors brick vs mortar by
+// the same mask, and the normal map is the height field's central-difference
+// gradient. Everything wraps, so the texture tiles seamlessly.
+
+constexpr int      kTexSize   = 512;
+constexpr int      kBrickW    = 64;
+constexpr int      kBrickH    = 32;
+constexpr int      kMortar    = 3;   // half-width of the mortar groove, px
+constexpr int      kBevel     = 4;   // ramp from mortar depth to brick top, px
+constexpr uint32_t kRows      = kTexSize / kBrickH; // even -> parity wraps seamlessly
+
+uint32_t Hash(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352dU;
+    x ^= x >> 15; x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+float Hash01(uint32_t x, uint32_t y, uint32_t salt) {
+    return float(Hash(x * 73856093U ^ y * 19349663U ^ salt * 83492791U) & 0xFFFFFF)
+         / float(0xFFFFFF);
+}
+
+// Height in [0,1] at wrapped texel coordinates; also reports which brick the
+// texel belongs to (for per-brick color/height variation).
+float BrickHeight(int px, int py, uint32_t& outBrickX, uint32_t& outBrickY) {
+    px = ((px % kTexSize) + kTexSize) % kTexSize;
+    py = ((py % kTexSize) + kTexSize) % kTexSize;
+
+    const int row  = py / kBrickH;
+    const int xoff = (row % 2) ? kBrickW / 2 : 0;     // running bond offset
+    const int gx   = px + xoff;
+    const int lx   = gx % kBrickW;
+    const int ly   = py % kBrickH;
+    outBrickX = uint32_t(gx / kBrickW);
+    outBrickY = uint32_t(row);
+
+    // Distance from the cell boundary; the mortar groove straddles it.
+    const int dx = lx < kBrickW - lx ? lx : kBrickW - 1 - lx;
+    const int dy = ly < kBrickH - ly ? ly : kBrickH - 1 - ly;
+    const int d  = dx < dy ? dx : dy;
+
+    float h;
+    if (d < kMortar)                 h = 0.0f;                              // groove
+    else if (d < kMortar + kBevel)   h = float(d - kMortar) / float(kBevel); // bevel ramp
+    else                             h = 1.0f;
+
+    // Per-brick height variation + fine surface noise.
+    h *= 0.85f + 0.15f * Hash01(outBrickX, outBrickY, 1);
+    h += 0.06f * (Hash01(uint32_t(px), uint32_t(py), 2) - 0.5f);
+    return h;
+}
+
+Image MakeBrickAlbedo() {
+    Image img;
+    img.width = img.height = kTexSize;
+    img.pixels.resize(size_t(kTexSize) * kTexSize * 4);
+
+    for (int y = 0; y < kTexSize; ++y) {
+        for (int x = 0; x < kTexSize; ++x) {
+            uint32_t bx, by;
+            const float h    = BrickHeight(x, y, bx, by);
+            const float mask = h < 0.15f ? 0.0f : 1.0f;   // mortar vs brick
+
+            // Hashed per-brick tint around a terracotta base; light gray mortar.
+            const float tint  = 0.80f + 0.35f * Hash01(bx, by, 3);
+            const float noise = 0.92f + 0.16f * Hash01(uint32_t(x), uint32_t(y), 4);
+            float r = mask * (0.62f * tint) + (1 - mask) * 0.66f;
+            float g = mask * (0.28f * tint) + (1 - mask) * 0.64f;
+            float b = mask * (0.23f * tint) + (1 - mask) * 0.60f;
+            r *= noise; g *= noise; b *= noise;
+
+            uint8_t* d = &img.pixels[(size_t(y) * kTexSize + x) * 4];
+            d[0] = uint8_t(std::min(r, 1.0f) * 255.0f + 0.5f);
+            d[1] = uint8_t(std::min(g, 1.0f) * 255.0f + 0.5f);
+            d[2] = uint8_t(std::min(b, 1.0f) * 255.0f + 0.5f);
+            d[3] = 255;
+        }
+    }
+    return img;
+}
+
+Image MakeBrickNormal() {
+    Image img;
+    img.width = img.height = kTexSize;
+    img.pixels.resize(size_t(kTexSize) * kTexSize * 4);
+
+    // Central differences over the (wrapping) height field. The image +Y axis is
+    // the UV +V axis, which is what the mesh handedness reconstructs as B —
+    // no green-channel flip needed for our own maps.
+    const float scale = 2.5f;  // groove depth in texel units
+    for (int y = 0; y < kTexSize; ++y) {
+        for (int x = 0; x < kTexSize; ++x) {
+            uint32_t bx, by;
+            const float hL = BrickHeight(x - 1, y, bx, by);
+            const float hR = BrickHeight(x + 1, y, bx, by);
+            const float hU = BrickHeight(x, y - 1, bx, by);
+            const float hD = BrickHeight(x, y + 1, bx, by);
+
+            float nx = (hL - hR) * 0.5f * scale;
+            float ny = (hU - hD) * 0.5f * scale;
+            float nz = 1.0f;
+            const float inv = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+            nx *= inv; ny *= inv; nz *= inv;
+
+            uint8_t* d = &img.pixels[(size_t(y) * kTexSize + x) * 4];
+            d[0] = uint8_t((nx * 0.5f + 0.5f) * 255.0f + 0.5f);
+            d[1] = uint8_t((ny * 0.5f + 0.5f) * 255.0f + 0.5f);
+            d[2] = uint8_t((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
+            d[3] = 255;
+        }
+    }
+    return img;
+}
+
+} // namespace
+
+const char* NormalMapScene::Description() const {
+    return "Texture + normal mapping: albedo through an sRGB SRV, per-pixel "
+           "normals from a tangent-space map rotated by the mesh's TBN basis "
+           "(tangents baked by the OBJ loader / analytic on the sphere). "
+           "Textures load from Assets/ or fall back to a procedural brick "
+           "generator (height field -> gradient normals). A/B every step below.";
+}
+
+bool NormalMapScene::BuildTextures(const DemoContext& ctx) {
+    ID3D12Device*       device = ctx.device;
+    ID3D12CommandQueue* queue  = ctx.renderer->GetCommandQueue();
+
+    // Prefer real assets when both are present; otherwise bake the brick.
+    const wchar_t* albedoPath = L"Assets/BrickAlbedo.png";
+    const wchar_t* normalPath = L"Assets/BrickNormal.png";
+    m_fromFiles = std::filesystem::exists(albedoPath)
+               && std::filesystem::exists(normalPath)
+               && m_albedo.CreateFromFile(device, queue, albedoPath, true)
+               && m_normal.CreateFromFile(device, queue, normalPath, false);
+
+    if (!m_fromFiles) {
+        if (!m_albedo.CreateFromImage(device, queue, MakeBrickAlbedo(), true) ||
+            !m_normal.CreateFromImage(device, queue, MakeBrickNormal(), false))
+            return false;
+        LogInfo("NormalMapScene: using procedural brick textures "
+                "(drop BrickAlbedo.png / BrickNormal.png into Assets/ to override)");
+    }
+
+    // Both SRVs side by side in one shader-visible heap = one descriptor table.
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 2;
+    hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
+        return false;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    m_albedo.CreateSrvInto(device, cpu);
+    cpu.ptr += inc;
+    m_normal.CreateSrvInto(device, cpu);
+    return true;
+}
+
+bool NormalMapScene::BuildPipeline(const DemoContext& ctx) {
+    ID3D12Device* device = ctx.device;
+    m_shaders.Initialize(L"Shaders");
+
+    // b0 object CBV, b1 frame CBV, SRV table (t0 albedo, t1 normal), static
+    // anisotropic wrap sampler at s0.
+    D3D12_DESCRIPTOR_RANGE range           = {};
+    range.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors                    = 2;
+    range.BaseShaderRegister                = 0; // t0..t1
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rp[3] = {};
+    rp[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rp[0].Descriptor.ShaderRegister = 0; // b0
+    rp[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+    rp[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rp[1].Descriptor.ShaderRegister = 1; // b1
+    rp[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+    rp[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[2].DescriptorTable.NumDescriptorRanges = 1;
+    rp[2].DescriptorTable.pDescriptorRanges   = &range;
+    rp[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter           = D3D12_FILTER_ANISOTROPIC;
+    samp.MaxAnisotropy    = 8;
+    samp.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samp.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samp.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samp.MaxLOD           = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister   = 0; // s0
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    if (!m_rootSig.Create(ctx.device, rp, 3, &samp, 1))
+        return false;
+
+    auto vs = m_shaders.GetOrCompile(L"NormalMap.hlsl", "VSMain", "vs_6_0");
+    auto ps = m_shaders.GetOrCompile(L"NormalMap.hlsl", "PSMain", "ps_6_0");
+    if (!vs || !ps) return false;
+
+    GraphicsPipelineDesc pd;
+    pd.rootSignature = m_rootSig.Get();
+    pd.vs = vs; pd.ps = ps;
+    pd.depthEnable = true;
+    pd.rtvFormat   = DXGI_FORMAT_R8G8B8A8_UNORM;
+    return m_pso.Create(device, pd);
+}
+
+void NormalMapScene::BuildObjects() {
+    m_objects.clear();
+    // Ground slab: tiled so the bricks stay near their authored texel density.
+    m_objects.push_back({ { 14.0f, 0.5f, 14.0f }, { 0.0f, -0.25f, 0.0f }, { 7.0f, 7.0f }, false });
+    // Static boxes.
+    m_objects.push_back({ { 2.0f, 2.0f, 2.0f },  { -3.5f, 1.0f,  1.5f }, { 1.0f, 1.0f }, false });
+    m_objects.push_back({ { 1.4f, 2.8f, 1.4f },  {  3.0f, 1.4f, -0.5f }, { 0.7f, 1.4f }, false });
+    // Spinning cube: shows the TBN following the surface as it rotates.
+    m_objects.push_back({ { 1.6f, 1.6f, 1.6f },  {  0.0f, 2.4f,  3.0f }, { 1.0f, 1.0f }, true  });
+}
+
+void NormalMapScene::OnLoad(const DemoContext& ctx) {
+    BuildObjects();
+    m_ready = BuildTextures(ctx) && BuildPipeline(ctx);
+}
+
+void NormalMapScene::OnUnload() {
+    // The blocking texture uploads finished long ago, but draws from the last
+    // in-flight frame may still reference the SRVs.
+    m_pso.Reset();
+    m_rootSig.Reset();
+    m_albedo.Reset();
+    m_normal.Reset();
+    m_srvHeap.Reset();
+    m_shaders.Shutdown();
+    m_objects.clear();
+    m_ready = false;
+}
+
+void NormalMapScene::OnUpdate(const DemoContext& ctx) {
+    m_spinAngle += ctx.dt * 0.6f;
+    if (m_animateLight) {
+        m_time += ctx.dt;
+        m_lightAzimuth = 0.8f + m_time * 0.3f;
+    }
+}
+
+void NormalMapScene::OnRender(const DemoContext& ctx) {
+    if (!m_ready) return;
+    ID3D12GraphicsCommandList* cmd = ctx.cmd;
+
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());
+    cmd->SetPipelineState(m_pso.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetGraphicsRootDescriptorTable(2, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
+
+    FrameCB fcb = {};
+    XMStoreFloat4(&fcb.LightDir, ComputeLightDir(m_lightElevation, m_lightAzimuth));
+    fcb.CameraPos      = { ctx.cameraPos[0], ctx.cameraPos[1], ctx.cameraPos[2], 1.0f };
+    fcb.NormalStrength = m_normalStrength;
+    fcb.UseNormalMap   = m_useNormalMap ? 1 : 0;
+    fcb.FlipGreen      = m_flipGreen ? 1 : 0;
+    fcb.ViewMode       = m_viewMode;
+    fcb.GammaCorrect   = m_gammaCorrect ? 1 : 0;
+    const auto fa = ctx.objectCB->Allocate(sizeof(fcb));
+    if (!fa.Cpu) return;
+    std::memcpy(fa.Cpu, &fcb, sizeof(fcb));
+    cmd->SetGraphicsRootConstantBufferView(1, fa.Gpu);
+
+    const XMMATRIX camVP = ctx.camera->GetViewProjection();
+    for (const Object& o : m_objects) {
+        XMMATRIX model = XMMatrixScaling(o.Scale.x, o.Scale.y, o.Scale.z);
+        if (o.Spin)
+            model *= XMMatrixRotationRollPitchYaw(m_spinAngle * 0.5f, m_spinAngle, 0.0f);
+        model *= XMMatrixTranslation(o.Pos.x, o.Pos.y, o.Pos.z);
+
+        ObjCB cb;
+        XMStoreFloat4x4(&cb.MVP, model * camVP);
+        XMStoreFloat4x4(&cb.Model, model);
+        cb.UvTiling = { o.Tiling.x * m_tilingScale, o.Tiling.y * m_tilingScale, 0, 0 };
+        const auto a = ctx.objectCB->Allocate(sizeof(cb));
+        if (!a.Cpu) continue;
+        std::memcpy(a.Cpu, &cb, sizeof(cb));
+        cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+        m_cube->Draw(cmd);
+    }
+}
+
+void NormalMapScene::OnImGui() {
+    ImGui::TextDisabled("Textures: %s (%ux%u, %u mips)",
+                        m_fromFiles ? "Assets/Brick*.png" : "procedural brick",
+                        m_albedo.Width(), m_albedo.Height(), m_albedo.MipLevels());
+    ImGui::Separator();
+
+    ImGui::Checkbox("Normal mapping", &m_useNormalMap);
+    ImGui::SliderFloat("Strength", &m_normalStrength, 0.0f, 3.0f, "%.2f");
+    ImGui::Checkbox("Flip green (OpenGL-style map)", &m_flipGreen);
+    ImGui::Checkbox("Gamma-correct output", &m_gammaCorrect);
+    ImGui::SliderFloat("UV tiling scale", &m_tilingScale, 0.25f, 4.0f, "%.2f");
+
+    const char* modes[] = { "Lit", "Albedo only", "Geometric normals", "Mapped normals" };
+    ImGui::Combo("View", &m_viewMode, modes, 4);
+
+    ImGui::Separator();
+    ImGui::Checkbox("Animate light", &m_animateLight);
+    ImGui::SliderFloat("Light elevation", &m_lightElevation, 15.0f, 80.0f, "%.0f deg");
+    ImGui::SliderFloat("Light azimuth",   &m_lightAzimuth, 0.0f, 6.28f, "%.2f");
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Albedo samples through an _SRGB SRV (decoded to\n"
+                        "linear by the hardware); the normal map stays UNORM —\n"
+                        "vectors are data, not color. Mips are CPU-box-filtered\n"
+                        "(sRGB-aware for albedo).");
+}
