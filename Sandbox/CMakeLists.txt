@@ -30,6 +30,8 @@ add_executable(Sandbox WIN32
     Scenes/PhysicsScene.cpp
     Scenes/JointScene.h
     Scenes/JointScene.cpp
+    Scenes/AnimationScene.h
+    Scenes/AnimationScene.cpp
 )
 
 # So scene sources can include "Scenes/..." relative to the Sandbox root.

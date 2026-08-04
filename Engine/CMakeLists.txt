@@ -23,6 +23,14 @@ add_library(SingularityEngine STATIC
     src/Memory/AllocatorBenchmark.cpp
     src/Jobs/JobSystem.h
     src/Jobs/JobSystem.cpp
+    src/Animation/Skeleton.h
+    src/Animation/AnimationClip.h
+    src/Animation/Animation.h
+    src/Animation/Animation.cpp
+    src/Assets/Json.h
+    src/Assets/Json.cpp
+    src/Assets/GltfLoader.h
+    src/Assets/GltfLoader.cpp
     src/Physics/RigidBody.h
     src/Physics/Contact.h
     src/Physics/Narrowphase.h
@@ -89,6 +97,8 @@ add_library(SingularityEngine STATIC
     src/Renderer/DX12/Texture2D.cpp
     src/Renderer/Mesh.h
     src/Renderer/Mesh.cpp
+    src/Renderer/SkinnedMesh.h
+    src/Renderer/SkinnedMesh.cpp
     src/Renderer/MeshLoader.h
     src/Renderer/MeshLoader.cpp
     src/Renderer/ImageLoader.h

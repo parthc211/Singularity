@@ -8,7 +8,7 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **15 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **16 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
@@ -26,6 +26,7 @@ The Sandbox app is a single executable hosting **15 interactive demos**, selecta
 | **Job System** | Work-stealing thread pool recording DX12 command lists in parallel, with a single/multi A/B toggle |
 | **Physics: Stacks & Rain** | Hand-written rigid-body solver — stable 10-box stacks, body rain, live tunables, contact overlay |
 | **Physics: Joints** | Ball / hinge / distance joints: hanging chain, trapdoor, wrecking ball vs box stack |
+| **Skeletal Animation** | Hand-written glTF 2.0 loader (JSON parser, GLB, skins, clips) + keyframe sampling, pose blending and GPU skinning via a bone-palette CBV, with an x-ray skeleton overlay |
 
 ## Engine systems
 
@@ -35,6 +36,8 @@ The Sandbox app is a single executable hosting **15 interactive demos**, selecta
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
 - **Physics:** a from-scratch 3D rigid-body engine (`Physics::PhysicsWorld`) built entirely on the engine's own SIMD math: sphere/box/plane colliders, SAT box-box narrowphase with Sutherland–Hodgman clipping, a warm-started sequential-impulse solver (accumulated & clamped impulses, friction cones, restitution, Baumgarte + speculative contacts), persistent manifolds, a spatial-hash broadphase, and ball/hinge/distance joints with energy-neutral NGS position correction — stepped at fixed 120 Hz substeps, single-threaded or JobSystem-parallel with bit-identical trajectories.
+- **Animation:** a skeletal-animation stack built on the engine's SIMD math — `Skeleton` (flat parent-before-child joint arrays, inverse binds), sparse keyframe `AnimationClip`s, cursor-cached sampling (slerp), pose blending (nlerp), single-pass pose propagation and bone-palette generation, GPU-skinned in the vertex shader (4 weights, 256-joint palette CBV).
+- **Assets:** a hand-written **glTF 2.0 loader** (own JSON parser, GLB container, accessors, skins, animations, base64/external buffers) with right-handed→left-handed conversion at import, feeding a format-agnostic `SkeletalMeshData`; plus the OBJ loader with tangent generation and WIC image loading.
 - **Scene:** a sparse-set **ECS** (`World` / `Entity` / `SparseSet`) with a `RenderSystem`, plus a `DemoScene` framework and a `SceneManager` with safe deferred scene switching.
 - **UI:** Dear ImGui (Win32 + DX12 backends) for per-demo controls and the scene switcher.
 
@@ -79,7 +82,9 @@ Singularity/
 
 ## Roadmap
 
-**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents).
+**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning).
+
+**Sample assets:** `CesiumMan.glb` (© Cesium, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and `Fox.glb` (© PixelMannen/tomkranis, CC-BY 4.0) from the [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) repository; `SimpleSkin` from the glTF 2.0 specification tutorials (CC-BY 4.0).
 
 **Next:** a renderer abstraction layer · portfolio polish.
 

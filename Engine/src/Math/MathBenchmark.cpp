@@ -177,6 +177,42 @@ BenchResults Run(bool includeTiming) {
         }
         record("Quat -> Matrix", err);
     }
+    {
+        float err = 0.0f;
+        for (int s = 0; s < 64; ++s) {
+            Quat qa = Normalize(Quat(RandVec(rng).v)), qb = Normalize(Quat(RandVec(rng).v));
+            float fd[4]; _mm_storeu_ps(fd, XMQuaternionDot(qa.v, qb.v));
+            err = std::max(err, std::fabs(Dot(qa, qb) - fd[0]));
+        }
+        record("Quat Dot", err);
+    }
+    {
+        std::uniform_real_distribution<float> t01(0.0f, 1.0f);
+        float err = 0.0f;
+        for (int s = 0; s < 64; ++s) {
+            Quat qa = Normalize(Quat(RandVec(rng).v)), qb = Normalize(Quat(RandVec(rng).v));
+            const float t = t01(rng);
+            // Reference: shortest-path component lerp, renormalized.
+            XMVECTOR bb = XMVectorGetX(XMQuaternionDot(qa.v, qb.v)) < 0.0f
+                        ? XMVectorNegate(qb.v) : qb.v;
+            float fs[4]; _mm_storeu_ps(fs, Nlerp(qa, qb, t).v);
+            float fd[4]; _mm_storeu_ps(fd, XMQuaternionNormalize(XMVectorLerp(qa.v, bb, t)));
+            err = std::max(err, MaxDiff(fs, fd, 4));
+        }
+        record("Quat Nlerp", err);
+    }
+    {
+        std::uniform_real_distribution<float> t01(0.0f, 1.0f);
+        float err = 0.0f;
+        for (int s = 0; s < 64; ++s) {
+            Quat qa = Normalize(Quat(RandVec(rng).v)), qb = Normalize(Quat(RandVec(rng).v));
+            const float t = t01(rng);
+            float fs[4]; _mm_storeu_ps(fs, Slerp(qa, qb, t).v);
+            float fd[4]; _mm_storeu_ps(fd, XMQuaternionSlerp(qa.v, qb.v, t));
+            err = std::max(err, MaxDiff(fs, fd, 4));
+        }
+        record("Quat Slerp", err);
+    }
 
     // ---- physics-support ops (added for the rigid-body solver) ----
     {

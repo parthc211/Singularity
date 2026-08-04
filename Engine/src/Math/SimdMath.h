@@ -57,6 +57,8 @@ inline Vec4& operator-=(Vec4& a, Vec4 b) { a.v = _mm_sub_ps(a.v, b.v); return a;
 inline Vec4 Min(Vec4 a, Vec4 b) { return Vec4(_mm_min_ps(a.v, b.v)); }
 inline Vec4 Max(Vec4 a, Vec4 b) { return Vec4(_mm_max_ps(a.v, b.v)); }
 
+inline Vec4 Lerp(Vec4 a, Vec4 b, float t) { return a + (b - a) * t; }
+
 // _mm_dp_ps (SSE4.1): the high nibble masks which lanes to multiply+sum, the low
 // nibble masks which output lanes receive the scalar result.
 inline float Dot(Vec4 a, Vec4 b)  { return _mm_cvtss_f32(_mm_dp_ps(a.v, b.v, 0xF1)); } // xyzw
@@ -235,6 +237,34 @@ inline Quat Conjugate(Quat q) {
 // which walks q off the unit sphere and renormalizes.
 inline Quat operator+(Quat a, Quat b) { return Quat(_mm_add_ps(a.v, b.v)); }
 inline Quat operator*(Quat a, float s){ return Quat(_mm_mul_ps(a.v, _mm_set1_ps(s))); }
+
+inline float Dot(Quat a, Quat b) { return _mm_cvtss_f32(_mm_dp_ps(a.v, b.v, 0xF1)); }
+
+// Interpolation for animation. Both take the shortest path: q and -q encode the
+// same rotation, so when the inputs sit in opposite hemispheres (dot < 0) one is
+// negated first — without this a blend swings the long way around.
+//
+// Nlerp: component lerp + renormalize. Cheapest, and what pose BLENDING wants
+// (the angular-speed distortion is invisible between two similar poses).
+inline Quat Nlerp(Quat a, Quat b, float t) {
+    if (Dot(a, b) < 0.0f) b = Quat(_mm_xor_ps(b.v, _mm_set1_ps(-0.0f)));
+    return Normalize(a + (b + a * -1.0f) * t);
+}
+
+// Slerp: constant angular velocity — what KEYFRAME interpolation wants (sparse
+// rotation keys sweep large angles, where nlerp would visibly ease in/out).
+// Matches XMQuaternionSlerp (validated in MathBenchmark); falls back to Nlerp
+// when the quats are nearly parallel and sin(theta) loses precision.
+inline Quat Slerp(Quat a, Quat b, float t) {
+    float d = Dot(a, b);
+    if (d < 0.0f) { b = Quat(_mm_xor_ps(b.v, _mm_set1_ps(-0.0f))); d = -d; }
+    if (d > 0.9995f) return Nlerp(a, b, t);
+    const float theta = std::acos(d);
+    const float invSin = 1.0f / std::sin(theta);
+    const float wa = std::sin((1.0f - t) * theta) * invSin;
+    const float wb = std::sin(t * theta) * invSin;
+    return a * wa + b * wb;
+}
 
 // Rotate vector v by unit quaternion q without forming the matrix:
 // t = 2(u x v), v' = v + w t + u x t  (u = q.xyz). Two crosses instead of the

@@ -26,6 +26,13 @@ public:
     void Update(const DemoContext& ctx);
     void Render(const DemoContext& ctx);
 
+    // App-exit teardown: OnUnload the active scene and destroy all scenes NOW,
+    // while the renderer (GPU heaps, device) still exists. Without this the
+    // scenes die by bare destructor after Renderer::Shutdown — a scene owning
+    // GPU allocations or worker threads (JobSystem) crashes the process on
+    // close. Call after WaitForGPU, before releasing shared GPU resources.
+    void Shutdown();
+
     // Draws a "Scene" window: a dropdown to switch + the active scene's
     // description and its own controls (OnImGui).
     void OnImGui(const DemoContext& ctx);

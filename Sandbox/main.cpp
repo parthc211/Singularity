@@ -25,6 +25,7 @@
 #include "Scenes/JobScene.h"
 #include "Scenes/PhysicsScene.h"
 #include "Scenes/JointScene.h"
+#include "Scenes/AnimationScene.h"
 
 #include "imgui.h"
 
@@ -144,6 +145,7 @@ protected:
         m_scenes.Add(std::make_unique<JobScene>(&m_mesh));
         m_scenes.Add(std::make_unique<PhysicsScene>(&m_mesh, &m_sphereMesh));
         m_scenes.Add(std::make_unique<JointScene>(&m_mesh, &m_sphereMesh));
+        m_scenes.Add(std::make_unique<AnimationScene>());
         m_scenes.SetActiveIndex(0, BuildContext(0.0f));
 
         // Camera — projection; view is rebuilt each frame from fly-cam state
@@ -306,6 +308,10 @@ protected:
         // the last in-flight frame. Drain it before releasing any GPU resource.
         // (Renderer::Shutdown also waits, but it runs *after* this hook.)
         GetRenderer().WaitForGPU();
+
+        // Unload + destroy scenes first: they own GPU-heap allocations and
+        // worker threads that must be released while the renderer is alive.
+        m_scenes.Shutdown();
 
         GetInput().UnlockCursor();
         m_shaderLib.Shutdown();

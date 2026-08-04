@@ -69,6 +69,14 @@ void SceneManager::OnImGui(const DemoContext& ctx) {
     ImGui::End();
 }
 
+void SceneManager::Shutdown() {
+    if (m_active >= 0)
+        m_scenes[m_active]->OnUnload();
+    m_active  = -1;
+    m_pending = -1;
+    m_scenes.clear();
+}
+
 DemoScene* SceneManager::Active() const {
     return (m_active >= 0) ? m_scenes[m_active].get() : nullptr;
 }

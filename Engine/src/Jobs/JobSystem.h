@@ -61,6 +61,11 @@ public:
     void Initialize(uint32_t maxThreads = 0);
     void Shutdown();
 
+    // Joining in the destructor is a safety net (Shutdown is idempotent):
+    // destroying a joinable std::thread calls std::terminate, so an owner that
+    // forgets Shutdown() must not crash the process on exit.
+    ~JobSystem() { Shutdown(); }
+
     // Schedule a single job.
     void Execute(Job job);
 
