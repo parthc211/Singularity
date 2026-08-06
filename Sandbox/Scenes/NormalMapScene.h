@@ -2,6 +2,7 @@
 #include "Scene/DemoScene.h"
 #include "Renderer/DX12/RootSignature.h"
 #include "Renderer/DX12/GraphicsPipeline.h"
+#include "Renderer/DX12/SrvHeap.h"
 #include "Renderer/DX12/Texture2D.h"
 #include "Renderer/ShaderLibrary.h"
 
@@ -53,7 +54,7 @@ private:
     SGE::GraphicsPipeline m_pso;
     SGE::Texture2D        m_albedo;
     SGE::Texture2D        m_normal;
-    ComPtr<ID3D12DescriptorHeap> m_srvHeap; // shader-visible: t0 albedo, t1 normal
+    SGE::SrvHeap          m_srvs;    // t0 albedo, t1 normal
     std::vector<Object>   m_objects;
 
     float m_time           = 0.0f;

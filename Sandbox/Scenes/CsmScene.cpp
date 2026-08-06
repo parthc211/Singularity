@@ -4,11 +4,11 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <random>
 #include <cmath>
-#include <cstring>
 #include <algorithm>
 
 using namespace SGE;
@@ -124,11 +124,10 @@ bool CsmScene::BuildPipelines(const DemoContext& ctx) {
     m_shaders.Initialize(L"Shaders");
 
     // Shadow pass: vertex-only depth, one CBV (the cascade light MVP).
-    D3D12_ROOT_PARAMETER sp      = {};
-    sp.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    sp.Descriptor.ShaderRegister = 0;
-    sp.ShaderVisibility          = D3D12_SHADER_VISIBILITY_VERTEX;
-    if (!m_shadowRootSig.Create(device, &sp, 1)) return false;
+    if (!RootSignatureBuilder()
+             .Cbv(0, D3D12_SHADER_VISIBILITY_VERTEX)
+             .Build(device, m_shadowRootSig))
+        return false;
 
     auto svs = m_shaders.GetOrCompile(L"ShadowDepth.hlsl", "VSMain", "vs_6_0");
     if (!svs) return false;
@@ -139,29 +138,13 @@ bool CsmScene::BuildPipelines(const DemoContext& ctx) {
     if (!m_shadowPSO.Create(device, sd)) return false;
 
     // Main pass: b0 obj, b1 frame, array SRV table, comparison sampler.
-    D3D12_DESCRIPTOR_RANGE range = {};
-    range.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors                    = 1;
-    range.BaseShaderRegister                = 0;
-    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-    D3D12_ROOT_PARAMETER lp[3] = {};
-    lp[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    lp[0].Descriptor.ShaderRegister = 0; lp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    lp[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    lp[1].Descriptor.ShaderRegister = 1; lp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    lp[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    lp[2].DescriptorTable.NumDescriptorRanges = 1;
-    lp[2].DescriptorTable.pDescriptorRanges   = &range;
-    lp[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC samp = {};
-    samp.Filter           = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samp.BorderColor      = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
-    samp.ComparisonFunc   = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-    samp.ShaderRegister   = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    samp.MaxLOD           = D3D12_FLOAT32_MAX;
-    if (!m_litRootSig.Create(device, lp, 3, &samp, 1)) return false;
+    if (!RootSignatureBuilder()
+             .Cbv(0)
+             .Cbv(1)
+             .SrvTable(0, 1)
+             .SamplerShadowPcf(0)
+             .Build(device, m_litRootSig))
+        return false;
 
     auto lvs = m_shaders.GetOrCompile(L"ShadowLitCsm.hlsl", "VSMain", "vs_6_0");
     auto lps = m_shaders.GetOrCompile(L"ShadowLitCsm.hlsl", "PSMain", "ps_6_0");
@@ -213,23 +196,14 @@ void CsmScene::OnRender(const DemoContext& ctx) {
         for (const Object& o : m_objects) {
             ShadowObjCB cb;
             XMStoreFloat4x4(&cb.LightMVP, XMLoadFloat4x4(&o.Model) * vp);
-            auto a = ctx.objectCB->Allocate(sizeof(cb));
-            if (!a.Cpu) continue;
-            std::memcpy(a.Cpu, &cb, sizeof(cb));
-            cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+            if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
             m_cube->Draw(cmd);
         }
     }
     m_csm.EndCascadePass(cmd);
 
     // ---- Restore back buffer + depth + full viewport. ----
-    D3D12_CPU_DESCRIPTOR_HANDLE backRtv = r->GetBackBufferRTV();
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv     = r->GetDepthDSV();
-    cmd->OMSetRenderTargets(1, &backRtv, FALSE, &dsv);
-    D3D12_VIEWPORT vp = { 0, 0, float(r->GetWidth()), float(r->GetHeight()), 0.0f, 1.0f };
-    D3D12_RECT     sc = { 0, 0, LONG(r->GetWidth()), LONG(r->GetHeight()) };
-    cmd->RSSetViewports(1, &vp);
-    cmd->RSSetScissorRects(1, &sc);
+    r->BindBackBufferTargets(cmd);
 
     // ---- Main pass: lit + cascaded shadows. ----
     cmd->SetGraphicsRootSignature(m_litRootSig.Get());
@@ -247,18 +221,14 @@ void CsmScene::OnRender(const DemoContext& ctx) {
     fcb.TexelSize    = 1.0f / kShadowSize;
     fcb.CascadeCount = kCascades;
     fcb.DebugTint    = m_debugTint ? 1 : 0;
-    auto fa = ctx.objectCB->Allocate(sizeof(fcb));
-    if (fa.Cpu) { std::memcpy(fa.Cpu, &fcb, sizeof(fcb)); cmd->SetGraphicsRootConstantBufferView(1, fa.Gpu); }
+    ctx.objectCB->BindCbv(cmd, 1, fcb);
 
     for (const Object& o : m_objects) {
         LitObjCB cb;
         XMStoreFloat4x4(&cb.MVP, XMLoadFloat4x4(&o.Model) * camVP);
         cb.Model = o.Model;
         cb.BaseColor = o.Color;
-        auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (!a.Cpu) continue;
-        std::memcpy(a.Cpu, &cb, sizeof(cb));
-        cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+        if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
         m_cube->Draw(cmd);
     }
 }

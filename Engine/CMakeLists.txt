@@ -87,6 +87,10 @@ add_library(SingularityEngine STATIC
     src/Renderer/DXC/DxcInstance.cpp
     src/Renderer/DX12/RootSignature.h
     src/Renderer/DX12/RootSignature.cpp
+    src/Renderer/DX12/RootSignatureBuilder.h
+    src/Renderer/DX12/RootSignatureBuilder.cpp
+    src/Renderer/DX12/SrvHeap.h
+    src/Renderer/DX12/SrvHeap.cpp
     src/Renderer/DX12/GraphicsPipeline.h
     src/Renderer/DX12/GraphicsPipeline.cpp
     src/Renderer/DX12/VertexBuffer.h

@@ -4,11 +4,11 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <DirectXMath.h>
 #include <cmath>
-#include <cstring>
 
 using namespace SGE;
 using namespace DirectX;
@@ -50,35 +50,15 @@ bool BloomScene::BuildPipelines(const DemoContext& ctx) {
     m_shaders.Initialize(L"Shaders");
 
     // --- Geometry root sig: one per-object CBV. ---
-    D3D12_ROOT_PARAMETER geoP      = {};
-    geoP.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    geoP.Descriptor.ShaderRegister = 0;
-    geoP.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    if (!m_geoRootSig.Create(device, &geoP, 1)) return false;
+    if (!RootSignatureBuilder().Cbv(0).Build(device, m_geoRootSig)) return false;
 
-    // Static linear-clamp sampler shared by all post passes.
-    D3D12_STATIC_SAMPLER_DESC samp = {};
-    samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp.ShaderRegister   = 0;
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    samp.MaxLOD           = D3D12_FLOAT32_MAX;
-
+    // Post root sigs: SRV table (param 0) + pixel CBV b0 (param 1), linear-clamp sampler.
     auto makePostRootSig = [&](RootSignature& rs, UINT srvCount) {
-        D3D12_DESCRIPTOR_RANGE range = {};
-        range.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        range.NumDescriptors                    = srvCount;
-        range.BaseShaderRegister                = 0;
-        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        D3D12_ROOT_PARAMETER p[2] = {};
-        p[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        p[0].DescriptorTable.NumDescriptorRanges = 1;
-        p[0].DescriptorTable.pDescriptorRanges   = &range;
-        p[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-        p[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        p[1].Descriptor.ShaderRegister           = 0;
-        p[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-        return rs.Create(device, p, 2, &samp, 1);
+        return RootSignatureBuilder()
+            .SrvTable(0, srvCount)
+            .Cbv(0, D3D12_SHADER_VISIBILITY_PIXEL)
+            .SamplerLinearClamp(0)
+            .Build(device, rs);
     };
     if (!makePostRootSig(m_postRootSig, 1))      return false; // bright / blur: 1 input
     if (!makePostRootSig(m_compositeRootSig, 2)) return false; // composite: scene + bloom
@@ -117,13 +97,8 @@ bool BloomScene::BuildPipelines(const DemoContext& ctx) {
 bool BloomScene::CreateTargets(ID3D12Device* device, uint32_t w, uint32_t h) {
     m_targetW = w; m_targetH = h;
 
-    if (!m_srvHeap) {
-        D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        d.NumDescriptors = 3; // scene, bloomA, bloomB
-        d.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (FAILED(device->CreateDescriptorHeap(&d, IID_PPV_ARGS(&m_srvHeap)))) return false;
-        m_srvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (!m_srvs.IsValid()) {
+        if (!m_srvs.Create(device, 3)) return false; // scene, bloomA, bloomB
     }
 
     const float dark[4]  = { 0.02f, 0.02f, 0.03f, 1.0f };
@@ -132,21 +107,10 @@ bool BloomScene::CreateTargets(ID3D12Device* device, uint32_t w, uint32_t h) {
     if (!m_bloomA.Create(device, w, h, kHDR, black))   return false;
     if (!m_bloomB.Create(device, w, h, kHDR, black))   return false;
 
-    m_sceneHDR.CreateSrvInto(device, SlotCpu(0));
-    m_bloomA.CreateSrvInto(device, SlotCpu(1));
-    m_bloomB.CreateSrvInto(device, SlotCpu(2));
+    m_srvs.Write(device, 0, m_sceneHDR);
+    m_srvs.Write(device, 1, m_bloomA);
+    m_srvs.Write(device, 2, m_bloomB);
     return true;
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE BloomScene::SlotGpu(uint32_t slot) const {
-    D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<UINT64>(slot) * m_srvStride;
-    return h;
-}
-D3D12_CPU_DESCRIPTOR_HANDLE BloomScene::SlotCpu(uint32_t slot) const {
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<SIZE_T>(slot) * m_srvStride;
-    return h;
 }
 
 void BloomScene::OnLoad(const DemoContext& ctx) {
@@ -158,7 +122,7 @@ void BloomScene::OnLoad(const DemoContext& ctx) {
 
 void BloomScene::OnUnload() {
     m_sceneHDR.Reset(); m_bloomA.Reset(); m_bloomB.Reset();
-    m_srvHeap.Reset(); m_srvStride = 0; m_targetW = m_targetH = 0;
+    m_srvs.Reset(); m_targetW = m_targetH = 0;
     m_geoPSO.Reset(); m_brightPSO.Reset(); m_blurPSO.Reset(); m_compositePSO.Reset();
     m_geoRootSig.Reset(); m_postRootSig.Reset(); m_compositeRootSig.Reset();
     m_shaders.Shutdown();
@@ -184,8 +148,7 @@ void BloomScene::OnRender(const DemoContext& ctx) {
     auto fullscreen = [&] { cmd->DrawInstanced(3, 1, 0, 0); }; // fullscreen triangle (SV_VertexID)
     auto post = [&](float dir, float thr, float intensity, float exposure) {
         PostCB cb{ texel, dir, thr, intensity, exposure, {0,0} };
-        auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (a.Cpu) { std::memcpy(a.Cpu, &cb, sizeof(cb)); cmd->SetGraphicsRootConstantBufferView(1, a.Gpu); }
+        ctx.objectCB->BindCbv(cmd, 1, cb);
     };
 
     // ---- Geometry -> HDR scene target ----
@@ -206,16 +169,11 @@ void BloomScene::OnRender(const DemoContext& ctx) {
         XMStoreFloat4x4(&cb.MVP, model * camVP);
         XMStoreFloat4x4(&cb.Model, model);
         cb.Color = o.color;
-        auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (!a.Cpu) continue;
-        std::memcpy(a.Cpu, &cb, sizeof(cb));
-        cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+        if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
         m_cube->Draw(cmd);
     }
 
     // All post passes sample through the shared SRV heap.
-    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
-    cmd->SetDescriptorHeaps(1, heaps);
     cmd->IASetVertexBuffers(0, 0, nullptr); // fullscreen passes use no vertex buffer
 
     // ---- Bright-pass: scene -> bloomA ----
@@ -225,7 +183,7 @@ void BloomScene::OnRender(const DemoContext& ctx) {
     cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     cmd->SetGraphicsRootSignature(m_postRootSig.Get());
     cmd->SetPipelineState(m_brightPSO.Get());
-    cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(0)); // scene
+    m_srvs.BindTable(cmd, 0, 0); // scene
     post(0.0f, m_threshold, 0.0f, 0.0f);
     fullscreen();
 
@@ -236,14 +194,14 @@ void BloomScene::OnRender(const DemoContext& ctx) {
         m_bloomA.TransitionTo(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         m_bloomB.TransitionTo(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rtv = m_bloomB.Rtv(); cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-        cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(1)); // bloomA
+        m_srvs.BindTable(cmd, 0, 1); // bloomA
         post(0.0f, 0.0f, 0.0f, 0.0f);
         fullscreen();
         // Vertical: bloomB -> bloomA
         m_bloomB.TransitionTo(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         m_bloomA.TransitionTo(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
         rtv = m_bloomA.Rtv(); cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-        cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(2)); // bloomB
+        m_srvs.BindTable(cmd, 0, 2); // bloomB
         post(1.0f, 0.0f, 0.0f, 0.0f);
         fullscreen();
     }
@@ -254,7 +212,7 @@ void BloomScene::OnRender(const DemoContext& ctx) {
     cmd->OMSetRenderTargets(1, &backRtv, FALSE, nullptr);
     cmd->SetGraphicsRootSignature(m_compositeRootSig.Get());
     cmd->SetPipelineState(m_compositePSO.Get());
-    cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(0)); // scene(t0) + bloomA(t1)
+    m_srvs.BindTable(cmd, 0, 0); // scene(t0) + bloomA(t1)
     post(0.0f, 0.0f, m_intensity, m_exposure);
     fullscreen();
 }

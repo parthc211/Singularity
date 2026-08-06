@@ -3,6 +3,7 @@
 #include "Core/Camera.h"
 #include "Core/Logger.h"
 #include "Renderer/Renderer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <algorithm>
@@ -46,13 +47,7 @@ bool AnimationScene::BuildPipelines(const DemoContext& ctx) {
     m_shaders.Initialize(L"Shaders");
 
     // --- skinned pass: b0 object, b1 frame, b2 bone palette ---
-    D3D12_ROOT_PARAMETER rp[3] = {};
-    for (int i = 0; i < 3; ++i) {
-        rp[i].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        rp[i].Descriptor.ShaderRegister = UINT(i);
-        rp[i].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    }
-    if (!m_skinRootSig.Create(device, rp, 3))
+    if (!RootSignatureBuilder().Cbv(0).Cbv(1).Cbv(2).Build(device, m_skinRootSig))
         return false;
 
     auto svs = m_shaders.GetOrCompile(L"SkinnedMesh.hlsl", "VSMain", "vs_6_0");
@@ -67,11 +62,7 @@ bool AnimationScene::BuildPipelines(const DemoContext& ctx) {
         return false;
 
     // --- line pass: one CBV, line topology; grid depth-tested, bones x-ray ---
-    D3D12_ROOT_PARAMETER lp      = {};
-    lp.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    lp.Descriptor.ShaderRegister = 0;
-    lp.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    if (!m_lineRootSig.Create(device, &lp, 1))
+    if (!RootSignatureBuilder().Cbv(0).Build(device, m_lineRootSig))
         return false;
 
     auto lvs = m_shaders.GetOrCompile(L"DebugLines.hlsl", "VSMain", "vs_6_0");
@@ -233,32 +224,23 @@ void AnimationScene::OnRender(const DemoContext& ctx) {
         FrameCB fcb;
         XMStoreFloat4(&fcb.LightDir, XMVector3Normalize(XMVectorSet(0.45f, -1.0f, 0.35f, 0)));
         fcb.CameraPos = { ctx.cameraPos[0], ctx.cameraPos[1], ctx.cameraPos[2], 1.0f };
-        const auto fa = ctx.objectCB->Allocate(sizeof(fcb));
-        if (fa.Cpu) {
-            std::memcpy(fa.Cpu, &fcb, sizeof(fcb));
-            cmd->SetGraphicsRootSignature(m_skinRootSig.Get());
-            cmd->SetPipelineState(m_skinPSO.Get());
-            cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            cmd->SetGraphicsRootConstantBufferView(1, fa.Gpu);
-
+        cmd->SetGraphicsRootSignature(m_skinRootSig.Get());
+        cmd->SetPipelineState(m_skinPSO.Get());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (ctx.objectCB->BindCbv(cmd, 1, fcb)) {
             for (const Instance& inst : m_instances) {
                 if (inst.Palette.empty()) continue;
-                const size_t paletteBytes = inst.Palette.size() * sizeof(Math::Mat4);
-                const auto pal = m_arena.Allocate(paletteBytes);
-                if (!pal.Cpu) break;   // arena full — skip remaining instances
-                std::memcpy(pal.Cpu, inst.Palette.data(), paletteBytes);
 
                 ObjCB ocb;
                 const XMMATRIX model = InstanceMatrix(inst);
                 XMStoreFloat4x4(&ocb.MVP, model * vp);
                 XMStoreFloat4x4(&ocb.Model, model);
                 ocb.BaseColor = c.Color;
-                const auto oa = ctx.objectCB->Allocate(sizeof(ocb));
-                if (!oa.Cpu) break;
-                std::memcpy(oa.Cpu, &ocb, sizeof(ocb));
 
-                cmd->SetGraphicsRootConstantBufferView(0, oa.Gpu);
-                cmd->SetGraphicsRootConstantBufferView(2, pal.Gpu);
+                if (!ctx.objectCB->BindCbv(cmd, 0, ocb)) break;
+                if (!m_arena.BindCbvRaw(cmd, 2, inst.Palette.data(),
+                                        inst.Palette.size() * sizeof(Math::Mat4)))
+                    break;   // arena full — skip remaining instances
                 c.Mesh.Draw(cmd);
             }
         }
@@ -268,24 +250,16 @@ void AnimationScene::OnRender(const DemoContext& ctx) {
     auto drawLines = [&](const std::vector<LineVertex>& verts, const XMMATRIX& xform,
                          GraphicsPipeline& pso) {
         if (verts.empty()) return;
-        const size_t bytes = verts.size() * sizeof(LineVertex);
-        const auto va = m_arena.Allocate(bytes);
-        LineCB lcb;
-        XMStoreFloat4x4(&lcb.Transform, xform);
-        const auto ca = ctx.objectCB->Allocate(sizeof(lcb));
-        if (!va.Cpu || !ca.Cpu) return;
-        std::memcpy(va.Cpu, verts.data(), bytes);
-        std::memcpy(ca.Cpu, &lcb, sizeof(lcb));
-
-        D3D12_VERTEX_BUFFER_VIEW vbv = {};
-        vbv.BufferLocation = va.Gpu;
-        vbv.SizeInBytes    = UINT(bytes);
-        vbv.StrideInBytes  = sizeof(LineVertex);
+        const D3D12_VERTEX_BUFFER_VIEW vbv = m_arena.PushVertices(
+            verts.data(), verts.size() * sizeof(LineVertex), sizeof(LineVertex));
+        if (!vbv.BufferLocation) return;
 
         cmd->SetGraphicsRootSignature(m_lineRootSig.Get());
         cmd->SetPipelineState(pso.Get());
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-        cmd->SetGraphicsRootConstantBufferView(0, ca.Gpu);
+        LineCB lcb;
+        XMStoreFloat4x4(&lcb.Transform, xform);
+        if (!ctx.objectCB->BindCbv(cmd, 0, lcb)) return;
         cmd->IASetVertexBuffers(0, 1, &vbv);
         cmd->DrawInstanced(UINT(verts.size()), 1, 0, 0);
     };

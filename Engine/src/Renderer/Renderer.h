@@ -51,6 +51,11 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRTV() const { return m_swapChain.GetCurrentRTV(); }
     D3D12_CPU_DESCRIPTOR_HANDLE GetDepthDSV()      const { return m_depthBuffer.GetDSV(); }
 
+    // Rebind the swap-chain back buffer + main depth and restore the full
+    // window viewport/scissor — the sequence every offscreen pass repeats to
+    // return to the screen. (Abstraction layer; no state transitions.)
+    void BindBackBufferTargets(ID3D12GraphicsCommandList* cmd) const;
+
 private:
     GraphicsDevice  m_graphicsDevice;
     SwapChain       m_swapChain;

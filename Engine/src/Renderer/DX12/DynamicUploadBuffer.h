@@ -1,6 +1,7 @@
 #pragma once
 #include "DX12Common.h" // ComPtr, ID3D12*, DXGI, SGE_THROW_IF_FAILED, FrameCount
 #include <cstdint>
+#include <type_traits>
 
 namespace SGE {
 
@@ -33,6 +34,25 @@ public:
     // 256-aligned sub-allocation inside the current frame's region. If the
     // region is exhausted it asserts and returns { nullptr, 0 }.
     Allocation Allocate(std::size_t sizeBytes);
+
+    // --- abstraction-layer conveniences over Allocate ---
+
+    // Allocate + copy + SetGraphicsRootConstantBufferView in one call — the
+    // triplet every scene draw repeats. Returns false if the arena is full.
+    template <typename T>
+    bool BindCbv(ID3D12GraphicsCommandList* cmd, UINT rootParam, const T& data) {
+        static_assert(std::is_trivially_copyable_v<T>,
+                      "constant-buffer structs must be trivially copyable");
+        return BindCbvRaw(cmd, rootParam, &data, sizeof(T));
+    }
+    bool BindCbvRaw(ID3D12GraphicsCommandList* cmd, UINT rootParam,
+                    const void* data, std::size_t sizeBytes);
+
+    // Copy transient vertex data (debug lines, per-frame geometry) into the
+    // arena and return a ready vertex-buffer view. BufferLocation == 0 (and
+    // SizeInBytes == 0) if the arena is full — callers should skip the draw.
+    D3D12_VERTEX_BUFFER_VIEW PushVertices(const void* data, std::size_t sizeBytes,
+                                          UINT strideBytes);
 
 private:
     static constexpr std::size_t CBAlign = 256; // D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT

@@ -5,10 +5,10 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <cmath>
-#include <cstring>
 #include <random>
 
 using namespace SGE;
@@ -48,11 +48,7 @@ bool DeferredScene::BuildPipelines(const DemoContext& ctx) {
     ID3D12Device* device = ctx.device;
 
     // --- Geometry pass: same b0 root CBV the forward RenderSystem feeds. ---
-    D3D12_ROOT_PARAMETER geoParam      = {};
-    geoParam.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    geoParam.Descriptor.ShaderRegister = 0;
-    geoParam.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    if (!m_geoRootSig.Create(device, &geoParam, 1))
+    if (!RootSignatureBuilder().Cbv(0).Build(device, m_geoRootSig))
         return false;
 
     auto gvs = m_shaders.GetOrCompile(L"GeometryPass.hlsl", "VSMain", "vs_6_0");
@@ -73,31 +69,11 @@ bool DeferredScene::BuildPipelines(const DemoContext& ctx) {
         return false;
 
     // --- Lighting pass: SRV table (t0..t2) + light CBV (b0) + static sampler. ---
-    D3D12_DESCRIPTOR_RANGE srvRange            = {};
-    srvRange.RangeType                          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors                     = GBuffer::kCount;
-    srvRange.BaseShaderRegister                 = 0; // t0
-    srvRange.OffsetInDescriptorsFromTableStart  = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER lightParams[2] = {};
-    lightParams[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    lightParams[0].DescriptorTable.NumDescriptorRanges = 1;
-    lightParams[0].DescriptorTable.pDescriptorRanges   = &srvRange;
-    lightParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-    lightParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    lightParams[1].Descriptor.ShaderRegister           = 0; // b0
-    lightParams[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT; // 1:1 G-buffer fetch
-    sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.ShaderRegister   = 0; // s0
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    sampler.MaxLOD           = D3D12_FLOAT32_MAX;
-
-    if (!m_lightRootSig.Create(device, lightParams, 2, &sampler, 1))
+    if (!RootSignatureBuilder()
+             .SrvTable(0, GBuffer::kCount)
+             .Cbv(0, D3D12_SHADER_VISIBILITY_PIXEL)
+             .SamplerPointClamp(0) // 1:1 G-buffer fetch
+             .Build(device, m_lightRootSig))
         return false;
 
     auto lvs = m_shaders.GetOrCompile(L"DeferredLighting.hlsl", "VSMain", "vs_6_0");
@@ -211,10 +187,7 @@ void DeferredScene::OnRender(const DemoContext& ctx) {
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetGraphicsRootDescriptorTable(0, m_gbuffer.SrvTable());
 
-    const auto alloc = ctx.objectCB->Allocate(sizeof(LightData));
-    if (alloc.Cpu) {
-        std::memcpy(alloc.Cpu, &m_lightData, sizeof(LightData));
-        cmd->SetGraphicsRootConstantBufferView(1, alloc.Gpu);
+    if (ctx.objectCB->BindCbv(cmd, 1, m_lightData)) {
         cmd->IASetVertexBuffers(0, 0, nullptr); // fullscreen triangle from SV_VertexID
         cmd->DrawInstanced(3, 1, 0, 0);
     }

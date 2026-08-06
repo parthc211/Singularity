@@ -3,11 +3,11 @@
 #include "Core/Camera.h"
 #include "Renderer/Renderer.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <DirectXMath.h>
 #include <vector>
-#include <cstring>
 
 using namespace SGE;
 using namespace DirectX;
@@ -65,11 +65,7 @@ bool TessellationScene::BuildPipelines(const DemoContext& ctx) {
     m_shaders.Initialize(L"Shaders");
 
     // One root CBV at b0, visible to all stages (VS/HS/DS read transforms + LOD).
-    D3D12_ROOT_PARAMETER cbv      = {};
-    cbv.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    cbv.Descriptor.ShaderRegister = 0;
-    cbv.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    if (!m_rootSig.Create(device, &cbv, 1))
+    if (!RootSignatureBuilder().Cbv(0).Build(device, m_rootSig))
         return false;
 
     auto vs = m_shaders.GetOrCompile(L"Tessellation.hlsl", "VSMain", "vs_6_0");
@@ -120,15 +116,11 @@ void TessellationScene::OnRender(const DemoContext& ctx) {
     cb.HeightScale = m_heightScale;
     cb.NoiseFreq   = m_noiseFreq;
 
-    const auto alloc = ctx.objectCB->Allocate(sizeof(TessCB));
-    if (!alloc.Cpu)
-        return;
-    std::memcpy(alloc.Cpu, &cb, sizeof(cb));
-
     // Back buffer + depth + viewport are already bound by Renderer::BeginFrame.
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
     cmd->SetPipelineState(m_wireframe ? m_wirePSO.Get() : m_solidPSO.Get());
-    cmd->SetGraphicsRootConstantBufferView(0, alloc.Gpu);
+    if (!ctx.objectCB->BindCbv(cmd, 0, cb))
+        return;
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
 
     D3D12_VERTEX_BUFFER_VIEW vbv = m_vb.GetView();

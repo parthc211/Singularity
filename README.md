@@ -65,31 +65,37 @@ Singularity/
 ├── CMakeLists.txt      # DXC/DXIL discovery, ImGui (FetchContent), subdirs
 ├── Engine/             # static lib "SingularityEngine"
 │   └── src/
+│       ├── Animation/  # Skeleton, AnimationClip, sampling/blending/palette, AnimationPlayer
+│       ├── Assets/     # hand-written JSON parser + glTF 2.0 loader (SkeletalMeshData)
 │       ├── Core/       # Logger, Window, Application, InputSystem, Camera, Transform
 │       ├── Jobs/       # work-stealing JobSystem
 │       ├── Math/       # SimdMath, ScalarMath, benchmarks
 │       ├── Memory/     # Arena / Stack / Pool / FreeList allocators
 │       ├── Physics/    # rigid bodies, narrowphase, solver, broadphase, joints
-│       ├── Renderer/   # Renderer, ShaderLibrary, Mesh, + DX12/ and DXC/ backends
+│       ├── Renderer/   # Renderer, ShaderLibrary, Mesh/SkinnedMesh, ImageLoader, + DX12/ and DXC/
 │       ├── Scene/      # ECS (World/Entity/SparseSet), RenderSystem, SceneManager
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 15 demo scenes
-    ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post)
-    └── Assets/         # cube.obj
+    ├── Scenes/         # the 16 demo scenes
+    ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
+    └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
 
 ## Roadmap
 
-**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning).
+**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning) · renderer abstraction layer (`RootSignatureBuilder`, `SrvHeap`, one-call constant/vertex binding, back-buffer pass restore — all 16 scenes migrated).
 
 **Sample assets:** `CesiumMan.glb` (© Cesium, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and `Fox.glb` (© PixelMannen/tomkranis, CC-BY 4.0) from the [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) repository; `SimpleSkin` from the glTF 2.0 specification tutorials (CC-BY 4.0).
 
-**Next:** a renderer abstraction layer · portfolio polish.
+**Next:** portfolio polish (screenshots/GIFs, Release benchmark numbers, demo reel).
+
+**Rendering & asset stretch ideas (documented, not built):** glTF-embedded texture extraction (decode GLB PNG buffers through the WIC loader so characters render textured) · a `ufbx` front-end feeding the same `SkeletalMeshData` (direct Mixamo FBX import) · parallax occlusion mapping and PBR material maps on top of the TBN groundwork · exact CUBICSPLINE keyframe interpolation and sparse-accessor support in the glTF loader.
+
+**Animation stretch ideas (documented, not built):** additive blend layers and per-bone masks · animation events · root-motion extraction · GPU pose evaluation (compute) for very large crowds.
 
 **Physics stretch ideas (documented, not built):** sleeping/islands · split-impulse contacts · capsule colliders · render-state interpolation between fixed steps · gyroscopic term in the integrator.
 
 ---
 
-*Built as a learning project to understand DirectX 12 internals — memory management, SIMD, deferred rendering, tessellation, shadows, and rigid-body simulation — from the ground up.*
+*Built as a learning project to understand DirectX 12 internals — memory management, SIMD, deferred rendering, tessellation, shadows, rigid-body simulation, and skeletal animation — from the ground up.*

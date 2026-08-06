@@ -5,6 +5,7 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <cmath>
@@ -186,18 +187,10 @@ bool NormalMapScene::BuildTextures(const DemoContext& ctx) {
     }
 
     // Both SRVs side by side in one shader-visible heap = one descriptor table.
-    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
-    hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2;
-    hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
+    if (!m_srvs.Create(device, 2))
         return false;
-
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-    const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    m_albedo.CreateSrvInto(device, cpu);
-    cpu.ptr += inc;
-    m_normal.CreateSrvInto(device, cpu);
+    m_srvs.Write(device, 0, m_albedo);
+    m_srvs.Write(device, 1, m_normal);
     return true;
 }
 
@@ -205,36 +198,14 @@ bool NormalMapScene::BuildPipeline(const DemoContext& ctx) {
     ID3D12Device* device = ctx.device;
     m_shaders.Initialize(L"Shaders");
 
-    // b0 object CBV, b1 frame CBV, SRV table (t0 albedo, t1 normal), static
-    // anisotropic wrap sampler at s0.
-    D3D12_DESCRIPTOR_RANGE range           = {};
-    range.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors                    = 2;
-    range.BaseShaderRegister                = 0; // t0..t1
-    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER rp[3] = {};
-    rp[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rp[0].Descriptor.ShaderRegister = 0; // b0
-    rp[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    rp[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rp[1].Descriptor.ShaderRegister = 1; // b1
-    rp[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    rp[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rp[2].DescriptorTable.NumDescriptorRanges = 1;
-    rp[2].DescriptorTable.pDescriptorRanges   = &range;
-    rp[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC samp = {};
-    samp.Filter           = D3D12_FILTER_ANISOTROPIC;
-    samp.MaxAnisotropy    = 8;
-    samp.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samp.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samp.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samp.MaxLOD           = D3D12_FLOAT32_MAX;
-    samp.ShaderRegister   = 0; // s0
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    if (!m_rootSig.Create(ctx.device, rp, 3, &samp, 1))
+    // b0 object CBV (param 0), b1 frame CBV (param 1), SRV table t0..t1
+    // (param 2), static anisotropic wrap sampler at s0.
+    if (!RootSignatureBuilder()
+             .Cbv(0)
+             .Cbv(1)
+             .SrvTable(0, 2)
+             .SamplerAnisoWrap(0)
+             .Build(device, m_rootSig))
         return false;
 
     auto vs = m_shaders.GetOrCompile(L"NormalMap.hlsl", "VSMain", "vs_6_0");
@@ -272,7 +243,7 @@ void NormalMapScene::OnUnload() {
     m_rootSig.Reset();
     m_albedo.Reset();
     m_normal.Reset();
-    m_srvHeap.Reset();
+    m_srvs.Reset();
     m_shaders.Shutdown();
     m_objects.clear();
     m_ready = false;
@@ -293,10 +264,7 @@ void NormalMapScene::OnRender(const DemoContext& ctx) {
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
     cmd->SetPipelineState(m_pso.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
-    cmd->SetDescriptorHeaps(1, heaps);
-    cmd->SetGraphicsRootDescriptorTable(2, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
+    m_srvs.BindTable(cmd, 2);
 
     FrameCB fcb = {};
     XMStoreFloat4(&fcb.LightDir, ComputeLightDir(m_lightElevation, m_lightAzimuth));
@@ -306,10 +274,7 @@ void NormalMapScene::OnRender(const DemoContext& ctx) {
     fcb.FlipGreen      = m_flipGreen ? 1 : 0;
     fcb.ViewMode       = m_viewMode;
     fcb.GammaCorrect   = m_gammaCorrect ? 1 : 0;
-    const auto fa = ctx.objectCB->Allocate(sizeof(fcb));
-    if (!fa.Cpu) return;
-    std::memcpy(fa.Cpu, &fcb, sizeof(fcb));
-    cmd->SetGraphicsRootConstantBufferView(1, fa.Gpu);
+    if (!ctx.objectCB->BindCbv(cmd, 1, fcb)) return;
 
     const XMMATRIX camVP = ctx.camera->GetViewProjection();
     for (const Object& o : m_objects) {
@@ -322,10 +287,7 @@ void NormalMapScene::OnRender(const DemoContext& ctx) {
         XMStoreFloat4x4(&cb.MVP, model * camVP);
         XMStoreFloat4x4(&cb.Model, model);
         cb.UvTiling = { o.Tiling.x * m_tilingScale, o.Tiling.y * m_tilingScale, 0, 0 };
-        const auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (!a.Cpu) continue;
-        std::memcpy(a.Cpu, &cb, sizeof(cb));
-        cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+        if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
         m_cube->Draw(cmd);
     }
 }

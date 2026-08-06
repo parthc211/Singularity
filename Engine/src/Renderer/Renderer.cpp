@@ -172,6 +172,18 @@ ID3D12CommandQueue* Renderer::GetCommandQueue() const
     return m_graphicsDevice.GetCommandQueue();
 }
 
+void Renderer::BindBackBufferTargets(ID3D12GraphicsCommandList* cmd) const
+{
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = GetBackBufferRTV();
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = GetDepthDSV();
+    cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+
+    const D3D12_VIEWPORT vp = { 0.0f, 0.0f, float(m_width), float(m_height), 0.0f, 1.0f };
+    const D3D12_RECT     sc = { 0, 0, LONG(m_width), LONG(m_height) };
+    cmd->RSSetViewports(1, &vp);
+    cmd->RSSetScissorRects(1, &sc);
+}
+
 void Renderer::Shutdown()
 {
     WaitForGPU();

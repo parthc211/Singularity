@@ -4,6 +4,7 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 #include "Scene/Components.h"
 #include "Scene/RenderSystem.h"
 
@@ -88,34 +89,16 @@ bool SsaoScene::BuildPipelines(const DemoContext& ctx) {
     m_shaders.Initialize(L"Shaders");
 
     // Geometry pass: same b0 per-object CBV the deferred RenderSystem feeds.
-    D3D12_ROOT_PARAMETER geoP      = {};
-    geoP.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    geoP.Descriptor.ShaderRegister = 0;
-    geoP.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    if (!m_geoRootSig.Create(device, &geoP, 1)) return false;
+    if (!RootSignatureBuilder().Cbv(0).Build(device, m_geoRootSig)) return false;
 
-    D3D12_STATIC_SAMPLER_DESC samp = {};
-    samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT; // exact G-buffer/AO fetches
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp.ShaderRegister   = 0;
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    samp.MaxLOD           = D3D12_FLOAT32_MAX;
-
+    // Post root sigs: SRV table (param 0) + pixel CBV b0 (param 1),
+    // point-clamp sampler for exact G-buffer/AO fetches.
     auto makePostRootSig = [&](RootSignature& rs, UINT srvCount) {
-        D3D12_DESCRIPTOR_RANGE range = {};
-        range.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        range.NumDescriptors                    = srvCount;
-        range.BaseShaderRegister                = 0;
-        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        D3D12_ROOT_PARAMETER p[2] = {};
-        p[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        p[0].DescriptorTable.NumDescriptorRanges = 1;
-        p[0].DescriptorTable.pDescriptorRanges   = &range;
-        p[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-        p[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        p[1].Descriptor.ShaderRegister           = 0;
-        p[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-        return rs.Create(device, p, 2, &samp, 1);
+        return RootSignatureBuilder()
+            .SrvTable(0, srvCount)
+            .Cbv(0, D3D12_SHADER_VISIBILITY_PIXEL)
+            .SamplerPointClamp(0)
+            .Build(device, rs);
     };
     if (!makePostRootSig(m_post1RootSig, 1)) return false; // blur
     if (!makePostRootSig(m_post2RootSig, 2)) return false; // ssao, composite
@@ -154,13 +137,8 @@ bool SsaoScene::BuildPipelines(const DemoContext& ctx) {
 
 bool SsaoScene::CreateTargets(ID3D12Device* device, uint32_t w, uint32_t h) {
     m_targetW = w; m_targetH = h;
-    if (!m_srvHeap) {
-        D3D12_DESCRIPTOR_HEAP_DESC d = {};
-        d.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        d.NumDescriptors = 5;
-        d.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (FAILED(device->CreateDescriptorHeap(&d, IID_PPV_ARGS(&m_srvHeap)))) return false;
-        m_srvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (!m_srvs.IsValid()) {
+        if (!m_srvs.Create(device, 5)) return false;
     }
     if (!m_gbuffer.Create(device, w, h)) return false;
     const float white[4] = { 1, 1, 1, 1 };
@@ -168,21 +146,12 @@ bool SsaoScene::CreateTargets(ID3D12Device* device, uint32_t w, uint32_t h) {
     if (!m_aoBlur.Create(device, w, h, DXGI_FORMAT_R8_UNORM, white)) return false;
 
     // Slots: 0=normal, 1=position, 2=AO, 3=albedo, 4=AOblurred.
-    CreateTex2DSrv(device, m_gbuffer.Resource(GBuffer::Normal),   GBuffer::Format(GBuffer::Normal),   SlotCpu(0));
-    CreateTex2DSrv(device, m_gbuffer.Resource(GBuffer::Position), GBuffer::Format(GBuffer::Position), SlotCpu(1));
-    m_ao.CreateSrvInto(device, SlotCpu(2));
-    CreateTex2DSrv(device, m_gbuffer.Resource(GBuffer::Albedo),   GBuffer::Format(GBuffer::Albedo),   SlotCpu(3));
-    m_aoBlur.CreateSrvInto(device, SlotCpu(4));
+    CreateTex2DSrv(device, m_gbuffer.Resource(GBuffer::Normal),   GBuffer::Format(GBuffer::Normal),   m_srvs.Cpu(0));
+    CreateTex2DSrv(device, m_gbuffer.Resource(GBuffer::Position), GBuffer::Format(GBuffer::Position), m_srvs.Cpu(1));
+    m_srvs.Write(device, 2, m_ao);
+    CreateTex2DSrv(device, m_gbuffer.Resource(GBuffer::Albedo),   GBuffer::Format(GBuffer::Albedo),   m_srvs.Cpu(3));
+    m_srvs.Write(device, 4, m_aoBlur);
     return true;
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE SsaoScene::SlotGpu(uint32_t slot) const {
-    D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<UINT64>(slot) * m_srvStride; return h;
-}
-D3D12_CPU_DESCRIPTOR_HANDLE SsaoScene::SlotCpu(uint32_t slot) const {
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<SIZE_T>(slot) * m_srvStride; return h;
 }
 
 void SsaoScene::OnLoad(const DemoContext& ctx) {
@@ -195,7 +164,7 @@ void SsaoScene::OnLoad(const DemoContext& ctx) {
 
 void SsaoScene::OnUnload() {
     m_gbuffer.Reset(); m_ao.Reset(); m_aoBlur.Reset();
-    m_srvHeap.Reset(); m_srvStride = 0; m_targetW = m_targetH = 0;
+    m_srvs.Reset(); m_targetW = m_targetH = 0;
     m_geoPSO.Reset(); m_ssaoPSO.Reset(); m_blurPSO.Reset(); m_compositePSO.Reset();
     m_geoRootSig.Reset(); m_post1RootSig.Reset(); m_post2RootSig.Reset();
     m_shaders.Shutdown();
@@ -223,8 +192,6 @@ void SsaoScene::OnRender(const DemoContext& ctx) {
     ctx.renderSystem->Render(m_world, *ctx.camera, *ctx.objectCB, cmd, ctx.rootParamIndexCBV);
 
     m_gbuffer.TransitionToShaderResources(cmd);
-    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
-    cmd->SetDescriptorHeaps(1, heaps);
     cmd->IASetVertexBuffers(0, 0, nullptr);
 
     auto fullscreen = [&] { cmd->DrawInstanced(3, 1, 0, 0); };
@@ -235,7 +202,7 @@ void SsaoScene::OnRender(const DemoContext& ctx) {
     cmd->OMSetRenderTargets(1, &aoRtv, FALSE, nullptr);
     cmd->SetGraphicsRootSignature(m_post2RootSig.Get());
     cmd->SetPipelineState(m_ssaoPSO.Get());
-    cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(0)); // normal, position
+    m_srvs.BindTable(cmd, 0, 0); // normal, position
     {
         SsaoCB cb{};
         XMStoreFloat4x4(&cb.ViewProj, ctx.camera->GetViewProjection());
@@ -243,8 +210,7 @@ void SsaoScene::OnRender(const DemoContext& ctx) {
         cb.Radius = m_radius; cb.Bias = m_bias; cb.Power = m_power; cb.Strength = m_strength;
         cb.Screen = { float(w), float(h) }; cb.SampleCount = m_samples; cb._pad = 0.0f;
         std::memcpy(cb.Kernel, m_kernel.data(), sizeof(cb.Kernel));
-        auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (a.Cpu) { std::memcpy(a.Cpu, &cb, sizeof(cb)); cmd->SetGraphicsRootConstantBufferView(1, a.Gpu); }
+        ctx.objectCB->BindCbv(cmd, 1, cb);
     }
     fullscreen();
 
@@ -255,11 +221,10 @@ void SsaoScene::OnRender(const DemoContext& ctx) {
     cmd->OMSetRenderTargets(1, &blurRtv, FALSE, nullptr);
     cmd->SetGraphicsRootSignature(m_post1RootSig.Get());
     cmd->SetPipelineState(m_blurPSO.Get());
-    cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(2)); // AO
+    m_srvs.BindTable(cmd, 0, 2); // AO
     {
         BlurCB cb{ { 1.0f / w, 1.0f / h }, { 0, 0 } };
-        auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (a.Cpu) { std::memcpy(a.Cpu, &cb, sizeof(cb)); cmd->SetGraphicsRootConstantBufferView(1, a.Gpu); }
+        ctx.objectCB->BindCbv(cmd, 1, cb);
     }
     fullscreen();
 
@@ -269,11 +234,10 @@ void SsaoScene::OnRender(const DemoContext& ctx) {
     cmd->OMSetRenderTargets(1, &backRtv, FALSE, nullptr);
     cmd->SetGraphicsRootSignature(m_post2RootSig.Get());
     cmd->SetPipelineState(m_compositePSO.Get());
-    cmd->SetGraphicsRootDescriptorTable(0, SlotGpu(3)); // albedo, AOblurred
+    m_srvs.BindTable(cmd, 0, 3); // albedo, AOblurred
     {
         CompositeCB cb{ m_mode, m_ambient, { 0, 0 } };
-        auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (a.Cpu) { std::memcpy(a.Cpu, &cb, sizeof(cb)); cmd->SetGraphicsRootConstantBufferView(1, a.Gpu); }
+        ctx.objectCB->BindCbv(cmd, 1, cb);
     }
     fullscreen();
 }

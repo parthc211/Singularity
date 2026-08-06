@@ -3,6 +3,7 @@
 #include "Core/Camera.h"
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <algorithm>
@@ -84,11 +85,7 @@ bool JobScene::BuildPipeline(const DemoContext& ctx)
 
     // One root CBV at b0, visible to ALL stages (VS reads gMVP/gModel, PS reads
     // gBaseColor) — same contract as the app's forward pipeline.
-    D3D12_ROOT_PARAMETER cbv      = {};
-    cbv.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    cbv.Descriptor.ShaderRegister = 0;
-    cbv.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    if (!m_rootSig.Create(device, &cbv, 1))
+    if (!RootSignatureBuilder().Cbv(0).Build(device, m_rootSig))
         return false;
 
     GraphicsPipelineDesc desc;

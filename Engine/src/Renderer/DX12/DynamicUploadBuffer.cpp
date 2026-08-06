@@ -1,6 +1,7 @@
 #include "DynamicUploadBuffer.h"
 #include "../../Core/Logger.h" // LogError — adjust if your logger's API differs
 #include <cassert>
+#include <cstring>
 
 namespace SGE {
 
@@ -77,6 +78,28 @@ DynamicUploadBuffer::Allocation DynamicUploadBuffer::Allocate(std::size_t sizeBy
     out.Gpu = m_gpuBase + offset;
     m_cursor += aligned;
     return out;
+}
+
+bool DynamicUploadBuffer::BindCbvRaw(ID3D12GraphicsCommandList* cmd, UINT rootParam,
+                                     const void* data, std::size_t sizeBytes) {
+    const Allocation a = Allocate(sizeBytes);
+    if (!a.Cpu) return false;
+    std::memcpy(a.Cpu, data, sizeBytes);
+    cmd->SetGraphicsRootConstantBufferView(rootParam, a.Gpu);
+    return true;
+}
+
+D3D12_VERTEX_BUFFER_VIEW DynamicUploadBuffer::PushVertices(const void* data,
+                                                           std::size_t sizeBytes,
+                                                           UINT strideBytes) {
+    D3D12_VERTEX_BUFFER_VIEW view = {};
+    const Allocation a = Allocate(sizeBytes);
+    if (!a.Cpu) return view;   // BufferLocation == 0 -> caller skips the draw
+    std::memcpy(a.Cpu, data, sizeBytes);
+    view.BufferLocation = a.Gpu;
+    view.SizeInBytes    = static_cast<UINT>(sizeBytes);
+    view.StrideInBytes  = strideBytes;
+    return view;
 }
 
 } // namespace SGE

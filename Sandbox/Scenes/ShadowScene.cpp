@@ -4,6 +4,7 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
 #include <cmath>
@@ -71,11 +72,9 @@ bool ShadowScene::BuildPipelines(const DemoContext& ctx) {
     m_shaders.Initialize(L"Shaders");
 
     // --- Shadow pass: one CBV (the light MVP), vertex-only, depth-only PSO. ---
-    D3D12_ROOT_PARAMETER sp      = {};
-    sp.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    sp.Descriptor.ShaderRegister = 0;
-    sp.ShaderVisibility          = D3D12_SHADER_VISIBILITY_VERTEX;
-    if (!m_shadowRootSig.Create(device, &sp, 1))
+    if (!RootSignatureBuilder()
+             .Cbv(0, D3D12_SHADER_VISIBILITY_VERTEX)
+             .Build(device, m_shadowRootSig))
         return false;
 
     auto svs = m_shaders.GetOrCompile(L"ShadowDepth.hlsl", "VSMain", "vs_6_0");
@@ -91,35 +90,12 @@ bool ShadowScene::BuildPipelines(const DemoContext& ctx) {
         return false;
 
     // --- Main pass: b0 obj CBV, b1 frame CBV, SRV table (shadow map), comparison sampler. ---
-    D3D12_DESCRIPTOR_RANGE range              = {};
-    range.RangeType                            = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors                       = 1;
-    range.BaseShaderRegister                   = 0; // t0
-    range.OffsetInDescriptorsFromTableStart    = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER lp[3] = {};
-    lp[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    lp[0].Descriptor.ShaderRegister = 0; // b0
-    lp[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    lp[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    lp[1].Descriptor.ShaderRegister = 1; // b1
-    lp[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    lp[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    lp[2].DescriptorTable.NumDescriptorRanges = 1;
-    lp[2].DescriptorTable.pDescriptorRanges   = &range;
-    lp[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC samp = {};
-    samp.Filter           = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT; // hardware PCF
-    samp.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samp.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samp.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-    samp.BorderColor      = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE; // outside light frustum = lit
-    samp.ComparisonFunc   = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-    samp.ShaderRegister   = 0; // s0
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    samp.MaxLOD           = D3D12_FLOAT32_MAX;
-    if (!m_litRootSig.Create(device, lp, 3, &samp, 1))
+    if (!RootSignatureBuilder()
+             .Cbv(0)
+             .Cbv(1)
+             .SrvTable(0, 1)
+             .SamplerShadowPcf(0)
+             .Build(device, m_litRootSig))
         return false;
 
     auto lvs = m_shaders.GetOrCompile(L"ShadowLit.hlsl", "VSMain", "vs_6_0");
@@ -175,22 +151,13 @@ void ShadowScene::OnRender(const DemoContext& ctx) {
     for (const Object& o : m_objects) {
         ShadowObjCB cb;
         XMStoreFloat4x4(&cb.LightMVP, XMLoadFloat4x4(&o.Model) * lightVP);
-        const auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (!a.Cpu) continue;
-        std::memcpy(a.Cpu, &cb, sizeof(cb));
-        cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+        if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
         m_cube->Draw(cmd);
     }
     m_shadowMap.EndShadowPass(cmd);
 
-    // ---- Restore the back buffer + depth + full viewport for the main pass. ----
-    D3D12_CPU_DESCRIPTOR_HANDLE backRtv = r->GetBackBufferRTV();
-    D3D12_CPU_DESCRIPTOR_HANDLE depthDsv = r->GetDepthDSV();
-    cmd->OMSetRenderTargets(1, &backRtv, FALSE, &depthDsv);
-    D3D12_VIEWPORT vp = { 0, 0, float(r->GetWidth()), float(r->GetHeight()), 0.0f, 1.0f };
-    D3D12_RECT     sc = { 0, 0, LONG(r->GetWidth()), LONG(r->GetHeight()) };
-    cmd->RSSetViewports(1, &vp);
-    cmd->RSSetScissorRects(1, &sc);
+    // ---- Back to the back buffer + full viewport for the main pass. ----
+    r->BindBackBufferTargets(cmd);
 
     // ---- Pass 2: shade + sample the shadow map. ----
     cmd->SetGraphicsRootSignature(m_litRootSig.Get());
@@ -206,11 +173,7 @@ void ShadowScene::OnRender(const DemoContext& ctx) {
     fcb.TexelSize = 1.0f / static_cast<float>(kShadowSize);
     fcb.PcfRadius = m_pcfRadius;
     fcb._pad      = 0.0f;
-    const auto fa = ctx.objectCB->Allocate(sizeof(fcb));
-    if (fa.Cpu) {
-        std::memcpy(fa.Cpu, &fcb, sizeof(fcb));
-        cmd->SetGraphicsRootConstantBufferView(1, fa.Gpu);
-    }
+    ctx.objectCB->BindCbv(cmd, 1, fcb);
 
     for (const Object& o : m_objects) {
         LitObjCB cb;
@@ -218,10 +181,7 @@ void ShadowScene::OnRender(const DemoContext& ctx) {
         cb.Model = o.Model;
         XMStoreFloat4x4(&cb.LightMVP, XMLoadFloat4x4(&o.Model) * lightVP);
         cb.BaseColor = o.Color;
-        const auto a = ctx.objectCB->Allocate(sizeof(cb));
-        if (!a.Cpu) continue;
-        std::memcpy(a.Cpu, &cb, sizeof(cb));
-        cmd->SetGraphicsRootConstantBufferView(0, a.Gpu);
+        if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
         m_cube->Draw(cmd);
     }
 }

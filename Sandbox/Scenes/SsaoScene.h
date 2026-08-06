@@ -5,6 +5,7 @@
 #include "Renderer/DX12/RenderTexture.h"
 #include "Renderer/DX12/RootSignature.h"
 #include "Renderer/DX12/GraphicsPipeline.h"
+#include "Renderer/DX12/SrvHeap.h"
 #include "Renderer/ShaderLibrary.h"
 
 #include <DirectXMath.h>
@@ -42,15 +43,12 @@ private:
     bool CreateTargets(ID3D12Device* device, uint32_t w, uint32_t h);
     void BuildScene();
     void BuildKernel();
-    D3D12_GPU_DESCRIPTOR_HANDLE SlotGpu(uint32_t slot) const;
-    D3D12_CPU_DESCRIPTOR_HANDLE SlotCpu(uint32_t slot) const;
 
     SGE::Mesh*            m_cube = nullptr;
     SGE::World            m_world;
     SGE::GBuffer          m_gbuffer;
     SGE::RenderTexture    m_ao, m_aoBlur;        // R8 occlusion + blurred
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap; // 0=N,1=Pos,2=AO,3=Albedo,4=AOblur
-    uint32_t              m_srvStride = 0;
+    SGE::SrvHeap          m_srvs; // 0=N,1=Pos,2=AO,3=Albedo,4=AOblur
     uint32_t              m_targetW = 0, m_targetH = 0;
 
     SGE::ShaderLibrary    m_shaders;
