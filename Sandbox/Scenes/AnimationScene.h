@@ -8,8 +8,11 @@
 #include "Renderer/DX12/RootSignature.h"
 #include "Renderer/DX12/GraphicsPipeline.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/SrvHeap.h"
+#include "Renderer/DX12/Texture2D.h"
 
 #include <DirectXMath.h>
+#include <string>
 #include <vector>
 
 // Skeletal animation showcase: glTF characters (hand-written loader) skinned
@@ -40,13 +43,15 @@ public:
 
 private:
     struct Character {
-        const char*           File   = nullptr;
-        const char*           Label  = nullptr;
-        float                 Scale  = 1.0f;   // display scale (Fox is ~75 units tall)
-        DirectX::XMFLOAT4     Color{ 1, 1, 1, 1 };
+        std::string           File;
+        std::string           Label;
+        float                 Scale  = 0.0f;   // display scale; <= 0 = auto from skinned extents
+        DirectX::XMFLOAT4     Color{ 1, 1, 1, 1 };  // tint; replaced by the material factor when textured
         SGE::SkeletalMeshData Data;
         SGE::SkinnedMesh      Mesh;
-        bool                  Loaded = false;
+        SGE::Texture2D        Tex;              // glTF base-color texture, or 1x1 white
+        bool                  HasTexture = false;
+        bool                  Loaded     = false;
     };
 
     // One animated character in the grid: its own playback state (current +
@@ -68,9 +73,9 @@ private:
     void EvaluateInstance(Instance& inst); // sample -> blend -> globals -> palette
     DirectX::XMMATRIX InstanceMatrix(const Instance& inst) const;
 
-    Character m_chars[2];
-    int       m_active    = 0;
-    int       m_clipIndex = 0;
+    std::vector<Character> m_chars;   // 2 glTF samples + every *.fbx found in Assets/
+    int                    m_active    = 0;
+    int                    m_clipIndex = 0;
 
     std::vector<Instance> m_instances;
     int                   m_gridN = 1;    // grid is N x N instances
@@ -83,6 +88,7 @@ private:
     SGE::GraphicsPipeline    m_gridPSO;   // depth-tested (ground grid)
     SGE::GraphicsPipeline    m_bonePSO;   // depth-off x-ray (skeleton overlay)
     SGE::DynamicUploadBuffer m_arena;     // per-frame bone palettes + line vertices
+    SGE::SrvHeap             m_srvs;      // slot per character: base-color texture
 
     bool  m_playing      = true;
     float m_speed        = 1.0f;

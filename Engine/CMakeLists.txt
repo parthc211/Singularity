@@ -31,6 +31,10 @@ add_library(SingularityEngine STATIC
     src/Assets/Json.cpp
     src/Assets/GltfLoader.h
     src/Assets/GltfLoader.cpp
+    src/Assets/FbxLoader.h
+    src/Assets/FbxLoader.cpp
+    third_party/ufbx/ufbx.h
+    third_party/ufbx/ufbx.c
     src/Physics/RigidBody.h
     src/Physics/Contact.h
     src/Physics/Narrowphase.h
@@ -114,6 +118,9 @@ add_library(SingularityEngine STATIC
 )
 
 target_include_directories(SingularityEngine PUBLIC src)
+# Vendored ufbx (single-file MIT/Unlicense FBX reader) — only FbxLoader.cpp
+# includes it, so the directory stays private to the engine target.
+target_include_directories(SingularityEngine PRIVATE third_party/ufbx)
 
 target_link_libraries(SingularityEngine PUBLIC
     d3d12.lib

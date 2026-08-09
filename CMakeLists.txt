@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(Singularity VERSION 0.1.0 LANGUAGES CXX)
+# C is enabled for the vendored ufbx library (single-file C99).
+project(Singularity VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,35 +58,33 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # ---------------------------------------------------------------------------
-# Dear ImGui (vendored via FetchContent, pinned tag).
-# ImGui ships no CMakeLists, so we download the sources and define our own
-# static library target from the core + the Win32 platform + DX12 renderer
-# backends. v1.91.5 is pinned deliberately: it uses the simple single-SRV
-# ImGui_ImplDX12_Init signature (later 1.92+ requires a descriptor-heap
-# allocator callback for dynamic textures — more machinery than we need).
-# ImGui is "boring plumbing" (UI), so using the library is in-bounds per the
-# project's no-third-party-for-showcase-systems rule.
+# Dear ImGui — vendored at v1.91.5 in Engine/third_party/imgui (version is
+# authoritative in imgui.h's IMGUI_VERSION). ImGui ships no CMakeLists, so we
+# define our own static library target from the core + the Win32 platform +
+# DX12 renderer backends. v1.91.5 is pinned deliberately: it uses the simple
+# single-SRV ImGui_ImplDX12_Init signature (later 1.92+ requires a
+# descriptor-heap allocator callback for dynamic textures — more machinery
+# than we need). ImGui is "boring plumbing" (UI), so using the library is
+# in-bounds per the project's no-third-party-for-showcase-systems rule.
+#
+# Vendored (like ufbx) rather than fetched so a clean clone builds offline
+# and byte-for-byte reproducibly, with no dependency on upstream hosting.
+# To upgrade: replace the files in Engine/third_party/imgui and re-check the
+# DX12 backend Init signature against UI/ImGuiLayer.cpp.
 # ---------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.5
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(imgui)
-
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/Engine/third_party/imgui)
 add_library(imgui STATIC
-    ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/imgui_demo.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_dx12.cpp
 )
 target_include_directories(imgui PUBLIC
-    ${imgui_SOURCE_DIR}
-    ${imgui_SOURCE_DIR}/backends
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
 )
 target_link_libraries(imgui PUBLIC d3d12.lib dxgi.lib dwmapi.lib)
 

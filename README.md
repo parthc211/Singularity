@@ -37,7 +37,7 @@ The Sandbox app is a single executable hosting **16 interactive demos**, selecta
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
 - **Physics:** a from-scratch 3D rigid-body engine (`Physics::PhysicsWorld`) built entirely on the engine's own SIMD math: sphere/box/plane colliders, SAT box-box narrowphase with Sutherland–Hodgman clipping, a warm-started sequential-impulse solver (accumulated & clamped impulses, friction cones, restitution, Baumgarte + speculative contacts), persistent manifolds, a spatial-hash broadphase, and ball/hinge/distance joints with energy-neutral NGS position correction — stepped at fixed 120 Hz substeps, single-threaded or JobSystem-parallel with bit-identical trajectories.
 - **Animation:** a skeletal-animation stack built on the engine's SIMD math — `Skeleton` (flat parent-before-child joint arrays, inverse binds), sparse keyframe `AnimationClip`s, cursor-cached sampling (slerp), pose blending (nlerp), single-pass pose propagation and bone-palette generation, GPU-skinned in the vertex shader (4 weights, 256-joint palette CBV).
-- **Assets:** a hand-written **glTF 2.0 loader** (own JSON parser, GLB container, accessors, skins, animations, base64/external buffers) with right-handed→left-handed conversion at import, feeding a format-agnostic `SkeletalMeshData`; plus the OBJ loader with tangent generation and WIC image loading.
+- **Assets:** a hand-written **glTF 2.0 loader** (own JSON parser, GLB container, accessors, skins, animations, embedded textures, base64/external buffers) with right-handed→left-handed conversion at import, feeding a format-agnostic `SkeletalMeshData`; an **FBX front-end** over the vendored single-file [ufbx](https://github.com/ufbx/ufbx) library (MIT/Unlicense — plumbing, like ImGui) targeting the same intermediate, with 30 Hz clip baking from ufbx's world matrices; plus the OBJ loader with tangent generation and WIC image loading.
 - **Scene:** a sparse-set **ECS** (`World` / `Entity` / `SparseSet`) with a `RenderSystem`, plus a `DemoScene` framework and a `SceneManager` with safe deferred scene switching.
 - **UI:** Dear ImGui (Win32 + DX12 backends) for per-demo controls and the scene switcher.
 
@@ -62,8 +62,9 @@ build\bin\Debug\Sandbox.exe
 
 ```
 Singularity/
-├── CMakeLists.txt      # DXC/DXIL discovery, ImGui (FetchContent), subdirs
+├── CMakeLists.txt      # DXC/DXIL discovery, imgui target, subdirs
 ├── Engine/             # static lib "SingularityEngine"
+│   ├── third_party/    # vendored deps: imgui v1.91.5 (MIT), ufbx (MIT/Unlicense)
 │   └── src/
 │       ├── Animation/  # Skeleton, AnimationClip, sampling/blending/palette, AnimationPlayer
 │       ├── Assets/     # hand-written JSON parser + glTF 2.0 loader (SkeletalMeshData)
@@ -86,15 +87,33 @@ Singularity/
 
 **Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning) · renderer abstraction layer (`RootSignatureBuilder`, `SrvHeap`, one-call constant/vertex binding, back-buffer pass restore — all 16 scenes migrated).
 
-**Sample assets:** `CesiumMan.glb` (© Cesium, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and `Fox.glb` (© PixelMannen/tomkranis, CC-BY 4.0) from the [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) repository; `SimpleSkin` from the glTF 2.0 specification tutorials (CC-BY 4.0).
+**Sample assets:** `CesiumMan.glb` (© Cesium, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and `Fox.glb` (© PixelMannen/tomkranis, CC-BY 4.0) from the [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) repository; `SimpleSkin` from the glTF 2.0 specification tutorials (CC-BY 4.0); `KenneyCharacter.fbx` (Kenney assets, CC0) and `maya_game_sausage_wiggle.fbx` from the [ufbx test suite](https://github.com/ufbx/ufbx).
 
-**Next:** portfolio polish (screenshots/GIFs, Release benchmark numbers, demo reel).
+### TODO
 
-**Rendering & asset stretch ideas (documented, not built):** glTF-embedded texture extraction (decode GLB PNG buffers through the WIC loader so characters render textured) · a `ufbx` front-end feeding the same `SkeletalMeshData` (direct Mixamo FBX import) · parallax occlusion mapping and PBR material maps on top of the TBN groundwork · exact CUBICSPLINE keyframe interpolation and sparse-accessor support in the glTF loader.
+**Portfolio polish (next up):**
+- [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
+- [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
+- [ ] Demo reel — a short video walking all 16 scenes
 
-**Animation stretch ideas (documented, not built):** additive blend layers and per-bone masks · animation events · root-motion extraction · GPU pose evaluation (compute) for very large crowds.
+**Rendering & assets:**
+- [x] glTF-embedded texture extraction — decode GLB PNG buffers through the WIC loader so characters render textured
+- [x] `ufbx` front-end feeding the same `SkeletalMeshData` — any `.fbx` dropped into `Assets/` (e.g. a Mixamo download) appears in the Skeletal Animation character list
+- [ ] Parallax occlusion mapping and PBR material maps on top of the TBN groundwork
+- [ ] Exact CUBICSPLINE keyframe interpolation and sparse-accessor support in the glTF loader
 
-**Physics stretch ideas (documented, not built):** sleeping/islands · split-impulse contacts · capsule colliders · render-state interpolation between fixed steps · gyroscopic term in the integrator.
+**Animation:**
+- [ ] Additive blend layers and per-bone masks
+- [ ] Animation events
+- [ ] Root-motion extraction
+- [ ] GPU pose evaluation (compute) for very large crowds
+
+**Physics:**
+- [ ] Sleeping/islands
+- [ ] Split-impulse contacts
+- [ ] Capsule colliders
+- [ ] Render-state interpolation between fixed steps
+- [ ] Gyroscopic term in the integrator
 
 ---
 

@@ -32,6 +32,10 @@ enum class ColorSpace { Linear, SRGB };
 // Decode an image file to RGBA8. Returns false (and logs) on failure.
 bool LoadImageRGBA8(const wchar_t* path, Image& out);
 
+// Decode an in-memory image (PNG/JPEG bytes — e.g. a GLB-embedded texture)
+// to RGBA8 through the same WIC path.
+bool LoadImageFromMemoryRGBA8(const uint8_t* data, size_t sizeBytes, Image& out);
+
 // Full mip chain down to 1x1. outMips[0] is a copy of base; each further level
 // floor-halves the dimensions (matching D3D12's mip sizing for NPOT textures).
 void GenerateMipChain(const Image& base, ColorSpace space, std::vector<Image>& outMips);

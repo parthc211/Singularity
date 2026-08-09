@@ -18,8 +18,10 @@
 //   quaternions:                                 (x,y,z,w) -> (-x,-y,z,w)
 //   matrices:                                    C * M * C  (C = diag(1,1,-1,1))
 //   tangent handedness w:                        flipped (mirror flips it)
-//   triangle winding:                            unchanged — the Z-mirror
-//     already turns glTF's CCW front faces into the engine's CW front faces.
+//   triangle winding:                            REVERSED per triangle. The
+//     Z-mirror flips orientation once, but the RH->LH view-convention change
+//     flips apparent orientation again — without the rewind, glTF's CCW front
+//     faces stay visually CCW and the engine (CW front) culls them.
 //   UVs: unchanged (glTF's top-left origin matches D3D).
 //
 // Joints are re-ordered parent-before-child (glTF does not guarantee it) and
@@ -28,6 +30,7 @@
 // ---------------------------------------------------------------------------
 #include "Animation/AnimationClip.h"
 #include "Animation/Skeleton.h"
+#include "Renderer/ImageLoader.h"   // Image — decoded material textures
 
 #include <cstdint>
 #include <vector>
@@ -56,6 +59,14 @@ struct SkeletalMeshData {
     std::vector<uint32_t>            Indices;
     Anim::Skeleton                   Skeleton;
     std::vector<Anim::AnimationClip> Clips;
+
+    // Material of the imported mesh's first material-bearing primitive:
+    // decoded CPU images (empty when the file has none — check IsValid()) and
+    // the base-color multiplier. Embedded (GLB buffer / data URI) and external
+    // image files both decode through the WIC loader.
+    Image BaseColorImage;
+    Image NormalImage;
+    float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 };
 
 // Loads a .glb or .gltf file. Merges all primitives of the first skinned

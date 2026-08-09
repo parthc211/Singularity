@@ -5,11 +5,15 @@
 #include "Renderer/Renderer.h"
 #include "Renderer/DX12/RootSignatureBuilder.h"
 
+#include "Assets/FbxLoader.h"
+
 #include "imgui.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 
 using namespace SGE;
 using namespace DirectX;
@@ -46,8 +50,13 @@ bool AnimationScene::BuildPipelines(const DemoContext& ctx) {
     ID3D12Device* device = ctx.device;
     m_shaders.Initialize(L"Shaders");
 
-    // --- skinned pass: b0 object, b1 frame, b2 bone palette ---
-    if (!RootSignatureBuilder().Cbv(0).Cbv(1).Cbv(2).Build(device, m_skinRootSig))
+    // --- skinned pass: b0 object, b1 frame, b2 bone palette,
+    //     t0 base-color texture (param 3), s0 aniso sampler ---
+    if (!RootSignatureBuilder()
+             .Cbv(0).Cbv(1).Cbv(2)
+             .SrvTable(0, 1)
+             .SamplerAnisoWrap(0)
+             .Build(device, m_skinRootSig))
         return false;
 
     auto svs = m_shaders.GetOrCompile(L"SkinnedMesh.hlsl", "VSMain", "vs_6_0");
@@ -82,7 +91,8 @@ bool AnimationScene::BuildPipelines(const DemoContext& ctx) {
 }
 
 void AnimationScene::RebuildInstances() {
-    const Character& c = m_chars[m_active];
+    if (m_chars.empty()) return;
+    const Character& c = m_chars[size_t(m_active)];
     const int count = m_gridN * m_gridN;
     m_instances.assign(size_t(count), Instance{});
 
@@ -103,7 +113,8 @@ void AnimationScene::RebuildInstances() {
 }
 
 void AnimationScene::SelectClip(int clip) {
-    Character& c = m_chars[m_active];
+    if (m_chars.empty()) return;
+    Character& c = m_chars[size_t(m_active)];
     if (!c.Loaded || c.Data.Clips.empty()) return;
     m_clipIndex = std::clamp(clip, 0, int(c.Data.Clips.size()) - 1);
 
@@ -118,32 +129,110 @@ void AnimationScene::SelectClip(int clip) {
 }
 
 XMMATRIX AnimationScene::InstanceMatrix(const Instance& inst) const {
-    const Character& c = m_chars[m_active];
+    const Character& c = m_chars[size_t(m_active)];
     return XMMatrixScaling(c.Scale, c.Scale, c.Scale)
          * XMMatrixRotationY(m_charYaw)
          * XMMatrixTranslation(inst.X, 0.0f, inst.Z);
 }
 
-void AnimationScene::OnLoad(const DemoContext& ctx) {
-    m_chars[0].File  = "Assets/CesiumMan.glb";
-    m_chars[0].Label = "CesiumMan";
-    m_chars[0].Scale = 1.0f;
-    m_chars[0].Color = { 0.62f, 0.72f, 0.80f, 1.0f };
-    m_chars[1].File  = "Assets/Fox.glb";
-    m_chars[1].Label = "Fox";
-    m_chars[1].Scale = 0.025f;   // the Fox is authored ~75 units tall
-    m_chars[1].Color = { 0.88f, 0.52f, 0.18f, 1.0f };
+namespace {
+// Display scale for auto-discovered characters: normalize the SKINNED rest
+// size (raw vertex units are meaningless for FBX, where unit conversion lives
+// in the transforms) to a ~1.8-unit-tall figure.
+float AutoScale(const SkeletalMeshData& data)
+{
+    std::vector<Anim::JointPose> pose = data.Skeleton.RestPose;
+    if (!data.Clips.empty())
+        Anim::SampleClip(data.Skeleton, data.Clips[0], 0.0f, pose);
+    std::vector<Math::Mat4> globals, palette;
+    Anim::ComputeGlobals(data.Skeleton, pose, globals);
+    Anim::ComputePalette(data.Skeleton, globals, palette);
 
+    float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+    for (const SkinnedVertex& sv : data.Vertices) {
+        Math::Vec4 acc(0, 0, 0, 0);
+        for (int k = 0; k < 4; ++k)
+            acc += Math::Transform(
+                       Math::Vec4(sv.position[0], sv.position[1], sv.position[2], 1.0f),
+                       palette[sv.joints[k]]) * sv.weights[k];
+        const float p[3] = { acc.x(), acc.y(), acc.z() };
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = std::min(lo[a], p[a]);
+            hi[a] = std::max(hi[a], p[a]);
+        }
+    }
+    const float maxExtent = std::max({ hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2] });
+    return maxExtent > 1e-5f ? 1.8f / maxExtent : 1.0f;
+}
+} // namespace
+
+void AnimationScene::OnLoad(const DemoContext& ctx) {
+    // Fixed glTF samples + every FBX dropped into Assets/ (the ufbx front-end:
+    // e.g. a Mixamo download appears in the character combo on next load).
+    m_chars.clear();
+    auto add = [&](std::string file, std::string label, float scale, XMFLOAT4 color) {
+        Character c;
+        c.File  = std::move(file);
+        c.Label = std::move(label);
+        c.Scale = scale;
+        c.Color = color;
+        m_chars.push_back(std::move(c));
+    };
+    add("Assets/CesiumMan.glb", "CesiumMan", 1.0f,   { 0.62f, 0.72f, 0.80f, 1.0f });
+    add("Assets/Fox.glb",       "Fox",       0.025f, { 0.88f, 0.52f, 0.18f, 1.0f });
+
+    const XMFLOAT4 fbxColors[] = { { 0.55f, 0.75f, 0.45f, 1.0f }, { 0.80f, 0.60f, 0.75f, 1.0f },
+                                   { 0.85f, 0.80f, 0.45f, 1.0f }, { 0.50f, 0.70f, 0.80f, 1.0f } };
+    std::error_code ec;
+    size_t fbxCount = 0;
+    for (const auto& entry : std::filesystem::directory_iterator("Assets", ec)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char ch) { return char(std::tolower(ch)); });
+        if (ext != ".fbx") continue;
+        add(entry.path().generic_string(), entry.path().stem().string(),
+            0.0f /* auto */, fbxColors[fbxCount++ % 4]);
+    }
+
+    ID3D12CommandQueue* queue = ctx.renderer->GetCommandQueue();
     for (Character& c : m_chars) {
-        c.Loaded = LoadGLTF(c.File, c.Data)
+        std::string ext = std::filesystem::path(c.File).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char ch) { return char(std::tolower(ch)); });
+        const bool parsed = (ext == ".fbx") ? LoadFBX(c.File.c_str(), c.Data)
+                                            : LoadGLTF(c.File.c_str(), c.Data);
+        c.Loaded = parsed
                 && c.Mesh.Upload(ctx.device, ctx.renderer->GetGeometryHeap(),
                                  c.Data.Vertices, c.Data.Indices);
         if (!c.Loaded)
-            LogError(std::string("AnimationScene: failed to load ") + c.File);
+            LogError("AnimationScene: failed to load " + c.File);
+        if (c.Loaded && c.Scale <= 0.0f)
+            c.Scale = AutoScale(c.Data);
+
+        // Base-color texture extracted from the glTF; when a character has a
+        // real texture its tint becomes the material's factor. Untextured (or
+        // failed) characters get 1x1 white so one PSO/shader serves all.
+        c.HasTexture = c.Loaded && c.Data.BaseColorImage.IsValid()
+                    && c.Tex.CreateFromImage(ctx.device, queue, c.Data.BaseColorImage, true);
+        if (c.HasTexture) {
+            c.Color = { c.Data.BaseColorFactor[0], c.Data.BaseColorFactor[1],
+                        c.Data.BaseColorFactor[2], c.Data.BaseColorFactor[3] };
+        } else {
+            Image white;
+            white.width = white.height = 1;
+            white.pixels = { 255, 255, 255, 255 };
+            c.Tex.CreateFromImage(ctx.device, queue, white, true);
+        }
     }
 
     m_jobs.Initialize(); // (cores - 1) workers
-    m_ready = BuildPipelines(ctx) && m_arena.Init(ctx.device, kArenaBytes);
+    m_ready = BuildPipelines(ctx) && m_arena.Init(ctx.device, kArenaBytes)
+           && !m_chars.empty() && m_srvs.Create(ctx.device, uint32_t(m_chars.size()));
+    if (m_ready)
+        for (uint32_t i = 0; i < uint32_t(m_chars.size()); ++i)
+            if (m_chars[i].Tex.IsValid())
+                m_srvs.Write(ctx.device, i, m_chars[i].Tex);
     m_clipIndex = 0;
     RebuildInstances();
 }
@@ -153,9 +242,10 @@ void AnimationScene::OnUnload() {
     m_instances.clear();
     for (Character& c : m_chars) {
         c.Mesh.Reset();
-        c.Data = {};
-        c.Loaded = false;
+        c.Tex.Reset();
     }
+    m_chars.clear();
+    m_srvs.Reset();
     m_skinPSO.Reset();
     m_gridPSO.Reset();
     m_bonePSO.Reset();
@@ -167,7 +257,7 @@ void AnimationScene::OnUnload() {
 }
 
 void AnimationScene::EvaluateInstance(Instance& inst) {
-    const Anim::Skeleton& sk = m_chars[m_active].Data.Skeleton;
+    const Anim::Skeleton& sk = m_chars[size_t(m_active)].Data.Skeleton;
     inst.Player.Sample(sk, inst.Pose);
     if (inst.Fade < 1.0f) {
         inst.PrevPlayer.Sample(sk, inst.PrevPose);
@@ -180,7 +270,8 @@ void AnimationScene::EvaluateInstance(Instance& inst) {
 }
 
 void AnimationScene::OnUpdate(const DemoContext& ctx) {
-    Character& c = m_chars[m_active];
+    if (m_chars.empty()) return;
+    Character& c = m_chars[size_t(m_active)];
     if (!c.Loaded || m_instances.empty()) return;
 
     if (m_playing) {
@@ -212,8 +303,9 @@ void AnimationScene::OnUpdate(const DemoContext& ctx) {
 }
 
 void AnimationScene::OnRender(const DemoContext& ctx) {
-    Character& c = m_chars[m_active];
-    if (!m_ready || !c.Loaded || m_instances.empty()) return;
+    if (!m_ready || m_chars.empty()) return;
+    Character& c = m_chars[size_t(m_active)];
+    if (!c.Loaded || m_instances.empty()) return;
     ID3D12GraphicsCommandList* cmd = ctx.cmd;
 
     m_arena.BeginFrame(ctx.renderer->GetFrameIndex());
@@ -227,6 +319,7 @@ void AnimationScene::OnRender(const DemoContext& ctx) {
         cmd->SetGraphicsRootSignature(m_skinRootSig.Get());
         cmd->SetPipelineState(m_skinPSO.Get());
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_srvs.BindTable(cmd, 3, uint32_t(m_active));   // this character's albedo
         if (ctx.objectCB->BindCbv(cmd, 1, fcb)) {
             for (const Instance& inst : m_instances) {
                 if (inst.Palette.empty()) continue;
@@ -300,19 +393,23 @@ void AnimationScene::OnRender(const DemoContext& ctx) {
 }
 
 void AnimationScene::OnImGui() {
-    Character& c = m_chars[m_active];
+    if (m_chars.empty()) return;
+    Character& c = m_chars[size_t(m_active)];
 
-    // Character / clip selection.
-    const char* charNames[2] = { m_chars[0].Label, m_chars[1].Label };
+    // Character / clip selection (2 glTF samples + discovered FBX files).
+    std::vector<const char*> charNames;
+    charNames.reserve(m_chars.size());
+    for (const Character& ch : m_chars) charNames.push_back(ch.Label.c_str());
     int active = m_active;
-    if (ImGui::Combo("Character", &active, charNames, 2) && active != m_active) {
+    if (ImGui::Combo("Character", &active, charNames.data(), int(charNames.size())) &&
+        active != m_active) {
         m_active    = active;
         m_clipIndex = 0;
         RebuildInstances();   // new skeleton — no crossfade across characters
     }
 
     if (!c.Loaded) {
-        ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "Failed to load %s", c.File);
+        ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "Failed to load %s", c.File.c_str());
         return;
     }
 
@@ -365,6 +462,11 @@ void AnimationScene::OnImGui() {
     ImGui::TextDisabled("%u verts, %u tris, %u joints, %zu clip(s) per char",
                         c.Mesh.VertexCount(), c.Mesh.IndexCount() / 3,
                         c.Data.Skeleton.JointCount(), c.Data.Clips.size());
+    if (c.HasTexture)
+        ImGui::TextDisabled("Albedo: %ux%u, extracted from the glTF (WIC memory decode)",
+                            c.Tex.Width(), c.Tex.Height());
+    else
+        ImGui::TextDisabled("Albedo: none in file — flat tint");
     ImGui::TextDisabled("Palette: %u x float4x4 root CBV (b2) per instance",
                         c.Data.Skeleton.JointCount());
 }

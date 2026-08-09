@@ -447,18 +447,104 @@ bool AppendPrimitive(const Gltf& g, const Value& prim,
         out.Vertices.push_back(sv);
     }
 
-    // Indices: keep order — the Z-mirror already fixed the winding.
+    // Indices: REWIND each triangle (swap its 2nd/3rd corner). The Z-mirror
+    // reverses triangle orientation, but moving from glTF's right-handed view
+    // convention to the engine's left-handed one reverses apparent orientation
+    // AGAIN — so imported CCW front faces would still appear CCW on screen and
+    // the rasterizer (CW = front) would cull them, rendering meshes inside-out.
+    // The swap restores clockwise front faces. (Regression: gltf_test asserts
+    // the imported mesh's signed volume matches cube.obj's winding convention.)
     const Value* idxV = prim.Find("indices");
     if (idxV) {
         const AccView idx = GetAccessor(g, int(idxV->Number));
         if (!idx.Valid()) { LogError("GltfLoader: bad index accessor"); return false; }
-        for (size_t i = 0; i < idx.count; ++i)
-            out.Indices.push_back(baseVertex + ReadU(idx, i, 0));
+        for (size_t i = 0; i + 2 < idx.count; i += 3) {
+            out.Indices.push_back(baseVertex + ReadU(idx, i + 0, 0));
+            out.Indices.push_back(baseVertex + ReadU(idx, i + 2, 0));
+            out.Indices.push_back(baseVertex + ReadU(idx, i + 1, 0));
+        }
     } else {
-        for (size_t i = 0; i < pos.count; ++i)
-            out.Indices.push_back(baseVertex + uint32_t(i));
+        for (size_t i = 0; i + 2 < pos.count; i += 3) {
+            out.Indices.push_back(baseVertex + uint32_t(i + 0));
+            out.Indices.push_back(baseVertex + uint32_t(i + 2));
+            out.Indices.push_back(baseVertex + uint32_t(i + 1));
+        }
     }
     return true;
+}
+
+// --- material texture extraction ----------------------------------------------------
+
+// Decode images[imageIndex] to RGBA8, whichever way the file stores it:
+// a bufferView (GLB-embedded PNG/JPEG), a base64 data URI, or an external file.
+bool DecodeGltfImage(const Gltf& g, int imageIndex,
+                     const std::filesystem::path& dir, Image& out)
+{
+    const Value* images = g.Arr("images");
+    if (!images || imageIndex < 0 || size_t(imageIndex) >= images->Size())
+        return false;
+    const Value& img = (*images)[size_t(imageIndex)];
+
+    if (const Value* bv = img.Find("bufferView")) {
+        if (!g.bufferViews || size_t(bv->Number) >= g.bufferViews->Size())
+            return false;
+        const Value& view = (*g.bufferViews)[size_t(bv->Number)];
+        const size_t buf  = size_t(view.GetNumber("buffer"));
+        const size_t off  = size_t(view.GetNumber("byteOffset", 0));
+        const size_t len  = size_t(view.GetNumber("byteLength", 0));
+        if (buf >= g.buffers.size() || len == 0 || off + len > g.buffers[buf].size())
+            return false;
+        return LoadImageFromMemoryRGBA8(g.buffers[buf].data() + off, len, out);
+    }
+
+    const std::string_view uri = img.GetString("uri");
+    if (uri.empty()) return false;
+    if (uri.starts_with("data:")) {
+        const size_t comma = uri.find(',');
+        std::vector<uint8_t> bytes;
+        if (comma == std::string_view::npos ||
+            !DecodeBase64(uri.substr(comma + 1), bytes))
+            return false;
+        return LoadImageFromMemoryRGBA8(bytes.data(), bytes.size(), out);
+    }
+    const std::filesystem::path file = dir / PercentDecode(uri);
+    return LoadImageRGBA8(file.c_str(), out);
+}
+
+// textures[textureIndex] -> images[] index (-1 when absent).
+int TextureImageIndex(const Gltf& g, int textureIndex)
+{
+    const Value* textures = g.Arr("textures");
+    if (!textures || textureIndex < 0 || size_t(textureIndex) >= textures->Size())
+        return -1;
+    return (*textures)[size_t(textureIndex)].GetInt("source", -1);
+}
+
+// Pull base-color + normal textures (and the base-color factor) of the mesh's
+// first material-bearing primitive into `out`.
+void LoadMaterial(const Gltf& g, const Value& prims,
+                  const std::filesystem::path& dir, SkeletalMeshData& out)
+{
+    const Value* materials = g.Arr("materials");
+    if (!materials) return;
+
+    int materialIdx = -1;
+    for (size_t p = 0; p < prims.Size() && materialIdx < 0; ++p)
+        materialIdx = prims[p].GetInt("material", -1);
+    if (materialIdx < 0 || size_t(materialIdx) >= materials->Size()) return;
+    const Value& mat = (*materials)[size_t(materialIdx)];
+
+    if (const Value* pbr = mat.Find("pbrMetallicRoughness")) {
+        if (const Value* f = pbr->Find("baseColorFactor"); f && f->Size() == 4)
+            for (int k = 0; k < 4; ++k)
+                out.BaseColorFactor[k] = float((*f)[size_t(k)].Number);
+        if (const Value* t = pbr->Find("baseColorTexture"))
+            DecodeGltfImage(g, TextureImageIndex(g, t->GetInt("index", -1)),
+                            dir, out.BaseColorImage);
+    }
+    if (const Value* nt = mat.Find("normalTexture"))
+        DecodeGltfImage(g, TextureImageIndex(g, nt->GetInt("index", -1)),
+                        dir, out.NormalImage);
 }
 
 // --- animation extraction -----------------------------------------------------------
@@ -800,12 +886,18 @@ bool LoadGLTF(const char* path, SkeletalMeshData& out)
         }
     }
 
+    // --- material textures ---
+    LoadMaterial(g, *prims, file.parent_path(), out);
+
     // --- animations ---
     LoadAnimations(g, nodeToJoint, out.Skeleton.JointCount(), out.Clips);
 
-    LogInfo(std::format("LoadGLTF: '{}' — {} verts, {} tris, {} joints, {} clip(s)",
+    LogInfo(std::format("LoadGLTF: '{}' — {} verts, {} tris, {} joints, {} clip(s), albedo {}",
                         path, out.Vertices.size(), out.Indices.size() / 3,
-                        out.Skeleton.JointCount(), out.Clips.size()));
+                        out.Skeleton.JointCount(), out.Clips.size(),
+                        out.BaseColorImage.IsValid()
+                            ? std::format("{}x{}", out.BaseColorImage.width, out.BaseColorImage.height)
+                            : "none"));
     return true;
 }
 

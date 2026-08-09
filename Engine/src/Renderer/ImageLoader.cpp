@@ -83,6 +83,59 @@ bool LoadImageRGBA8(const wchar_t* path, Image& out)
     return true;
 }
 
+bool LoadImageFromMemoryRGBA8(const uint8_t* data, size_t sizeBytes, Image& out)
+{
+    out = {};
+    if (!data || sizeBytes == 0) return false;
+    if (!EnsureComInitialized()) {
+        LogError("LoadImageFromMemoryRGBA8: COM initialization failed");
+        return false;
+    }
+
+    auto fail = [](const char* what, HRESULT hr) {
+        LogError(std::format("LoadImageFromMemoryRGBA8: {} failed (0x{:08X})",
+                             what, static_cast<uint32_t>(hr)));
+        return false;
+    };
+
+    ComPtr<IWICImagingFactory> factory;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) return fail("CoCreateInstance(WICImagingFactory)", hr);
+
+    ComPtr<IWICStream> stream;
+    hr = factory->CreateStream(&stream);
+    if (FAILED(hr)) return fail("CreateStream", hr);
+    // WIC only reads during decode below, so the const_cast is not written through.
+    hr = stream->InitializeFromMemory(const_cast<uint8_t*>(data), DWORD(sizeBytes));
+    if (FAILED(hr)) return fail("InitializeFromMemory", hr);
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    hr = factory->CreateDecoderFromStream(stream.Get(), nullptr,
+                                          WICDecodeMetadataCacheOnDemand, &decoder);
+    if (FAILED(hr)) return fail("CreateDecoderFromStream", hr);
+
+    ComPtr<IWICBitmapFrameDecode> frame;
+    hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr)) return fail("GetFrame", hr);
+
+    ComPtr<IWICBitmapSource> converted;
+    hr = WICConvertBitmapSource(GUID_WICPixelFormat32bppRGBA, frame.Get(), &converted);
+    if (FAILED(hr)) return fail("WICConvertBitmapSource", hr);
+
+    UINT w = 0, h = 0;
+    hr = converted->GetSize(&w, &h);
+    if (FAILED(hr) || w == 0 || h == 0) return fail("GetSize", hr);
+
+    out.width  = w;
+    out.height = h;
+    out.pixels.resize(size_t(w) * h * 4);
+    hr = converted->CopyPixels(nullptr, w * 4, UINT(out.pixels.size()), out.pixels.data());
+    if (FAILED(hr)) { out = {}; return fail("CopyPixels", hr); }
+
+    return true;
+}
+
 // --- mip generation ------------------------------------------------------------
 
 // sRGB <-> linear (exact piecewise curve, not the 2.2 approximation, so repeated

@@ -26,6 +26,11 @@ cbuffer Bones : register(b2)
     float4x4 gBones[MAX_BONES];
 };
 
+// Base-color texture extracted from the glTF (sRGB SRV -> already linear when
+// sampled). Untextured characters bind 1x1 white, so gBaseColor is the color.
+Texture2D    gAlbedoMap : register(t0);
+SamplerState gSampler   : register(s0);
+
 struct VSInput {
     float3 Position : POSITION;
     float3 Normal   : NORMAL;
@@ -72,7 +77,7 @@ float4 PSMain(VSOutput i) : SV_TARGET
     const float back = saturate(dot(N, -L)) * 0.15;          // soft fill light
     const float spec = pow(saturate(dot(N, H)), 32.0) * 0.25;
 
-    const float3 albedo = gBaseColor.rgb;
+    const float3 albedo = gBaseColor.rgb * gAlbedoMap.Sample(gSampler, i.Uv).rgb;
     float3 color = albedo * (0.18 + ndl * 0.9 + back) + spec * ndl;
     return float4(pow(color, 1.0 / 2.2), 1.0);
 }
