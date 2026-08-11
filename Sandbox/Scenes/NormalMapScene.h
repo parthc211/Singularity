@@ -41,7 +41,9 @@ private:
         DirectX::XMFLOAT3 Scale;
         DirectX::XMFLOAT3 Pos;
         DirectX::XMFLOAT2 Tiling;
-        bool              Spin = false;  // model matrix rebuilt with rotation each frame
+        bool              Spin      = false; // model matrix rebuilt with rotation each frame
+        float             Metallic  = -1.0f; // < 0: from the ORM map; else forced
+        float             RoughMult = 1.0f;  // per-object roughness multiplier
     };
 
     bool BuildPipeline(const SGE::DemoContext& ctx);
@@ -54,7 +56,8 @@ private:
     SGE::GraphicsPipeline m_pso;
     SGE::Texture2D        m_albedo;
     SGE::Texture2D        m_normal;
-    SGE::SrvHeap          m_srvs;    // t0 albedo, t1 normal
+    SGE::Texture2D        m_orm;     // R=AO, G=roughness, B=metalness (glTF packing)
+    SGE::SrvHeap          m_srvs;    // t0 albedo, t1 normal, t2 ORM
     std::vector<Object>   m_objects;
 
     float m_time           = 0.0f;
@@ -67,7 +70,13 @@ private:
     bool  m_gammaCorrect   = true;
     float m_normalStrength = 1.0f;
     float m_tilingScale    = 1.0f;
-    int   m_viewMode       = 0;      // 0 lit, 1 albedo, 2 geometric N, 3 mapped N
+    int   m_viewMode       = 0;      // 0 lit, 1 albedo, 2 geo N, 3 mapped N, 4 height
+    bool  m_usePom         = true;   // parallax occlusion mapping
+    float m_heightScale    = 0.06f;  // parallax depth in UV units
+    bool  m_pomShadow      = true;   // contact shadows from the height field
+    int   m_pomSteps       = 32;     // max ray-march layers
+    bool  m_useMaterialMap = true;   // ORM map vs neutral constant material
+    float m_roughnessScale = 1.0f;   // global roughness multiplier
     bool  m_fromFiles      = false;  // textures loaded from Assets/ vs procedural
     bool  m_ready          = false;
 };

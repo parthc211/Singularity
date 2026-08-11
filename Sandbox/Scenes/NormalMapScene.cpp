@@ -8,6 +8,7 @@
 #include "Renderer/DX12/RootSignatureBuilder.h"
 
 #include "imgui.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -22,6 +23,7 @@ struct ObjCB {
     XMFLOAT4X4 MVP;
     XMFLOAT4X4 Model;
     XMFLOAT4   UvTiling;
+    XMFLOAT4   Material;   // x = roughness mult, y = metallic override (<0 = map)
 };
 struct FrameCB {
     XMFLOAT4 LightDir;
@@ -31,7 +33,13 @@ struct FrameCB {
     int      FlipGreen;
     int      ViewMode;
     int      GammaCorrect;
-    float    _pad[3];
+    float    HeightScale;
+    int      UsePom;
+    int      PomShadow;
+    int      PomSteps;
+    float    RoughnessScale;
+    int      UseMaterialMap;
+    float    _pad;
 };
 
 XMVECTOR ComputeLightDir(float elevationDeg, float azimuth) {
@@ -130,11 +138,13 @@ Image MakeBrickNormal() {
 
     // Central differences over the (wrapping) height field. The image +Y axis is
     // the UV +V axis, which is what the mesh handedness reconstructs as B —
-    // no green-channel flip needed for our own maps.
+    // no green-channel flip needed for our own maps. The ALPHA channel stores
+    // the height itself (1 = brick top, 0 = mortar) for parallax occlusion.
     const float scale = 2.5f;  // groove depth in texel units
     for (int y = 0; y < kTexSize; ++y) {
         for (int x = 0; x < kTexSize; ++x) {
             uint32_t bx, by;
+            const float h  = BrickHeight(x, y, bx, by);
             const float hL = BrickHeight(x - 1, y, bx, by);
             const float hR = BrickHeight(x + 1, y, bx, by);
             const float hU = BrickHeight(x, y - 1, bx, by);
@@ -150,6 +160,35 @@ Image MakeBrickNormal() {
             d[0] = uint8_t((nx * 0.5f + 0.5f) * 255.0f + 0.5f);
             d[1] = uint8_t((ny * 0.5f + 0.5f) * 255.0f + 0.5f);
             d[2] = uint8_t((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
+            d[3] = uint8_t(std::clamp(h, 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    }
+    return img;
+}
+
+// ORM material map, glTF packing: R = ambient occlusion (crevices dark),
+// G = roughness (mortar rough, brick faces glossier with per-brick variation),
+// B = metalness (bricks are dielectric: 0). Linear data — never sRGB.
+Image MakeBrickORM() {
+    Image img;
+    img.width = img.height = kTexSize;
+    img.pixels.resize(size_t(kTexSize) * kTexSize * 4);
+
+    for (int y = 0; y < kTexSize; ++y) {
+        for (int x = 0; x < kTexSize; ++x) {
+            uint32_t bx, by;
+            const float h = std::clamp(BrickHeight(x, y, bx, by), 0.0f, 1.0f);
+
+            const float ao    = 0.45f + 0.55f * h;   // grooves occluded, tops open
+            const float rough = h < 0.15f
+                              ? 0.92f                                        // mortar
+                              : 0.42f + 0.30f * Hash01(bx, by, 5)
+                                      + 0.10f * (Hash01(uint32_t(x), uint32_t(y), 6) - 0.5f);
+
+            uint8_t* d = &img.pixels[(size_t(y) * kTexSize + x) * 4];
+            d[0] = uint8_t(std::clamp(ao,    0.0f, 1.0f) * 255.0f + 0.5f);
+            d[1] = uint8_t(std::clamp(rough, 0.0f, 1.0f) * 255.0f + 0.5f);
+            d[2] = 0;
             d[3] = 255;
         }
     }
@@ -159,38 +198,44 @@ Image MakeBrickNormal() {
 } // namespace
 
 const char* NormalMapScene::Description() const {
-    return "Texture + normal mapping: albedo through an sRGB SRV, per-pixel "
-           "normals from a tangent-space map rotated by the mesh's TBN basis "
-           "(tangents baked by the OBJ loader / analytic on the sphere). "
-           "Textures load from Assets/ or fall back to a procedural brick "
-           "generator (height field -> gradient normals). A/B every step below.";
+    return "The material pipeline end to end: sRGB albedo, tangent-space "
+           "normal map (height in alpha), parallax occlusion mapping with "
+           "contact shadows, and an ORM map (AO / roughness / metalness, glTF "
+           "packing) driving a Cook-Torrance GGX BRDF — Fresnel-Schlick, "
+           "Smith geometry, energy-aware diffuse. Textures load from Assets/ "
+           "or fall back to the procedural brick generator. A/B every step.";
 }
 
 bool NormalMapScene::BuildTextures(const DemoContext& ctx) {
     ID3D12Device*       device = ctx.device;
     ID3D12CommandQueue* queue  = ctx.renderer->GetCommandQueue();
 
-    // Prefer real assets when both are present; otherwise bake the brick.
+    // Prefer real assets when all are present; otherwise bake the brick.
     const wchar_t* albedoPath = L"Assets/BrickAlbedo.png";
     const wchar_t* normalPath = L"Assets/BrickNormal.png";
+    const wchar_t* ormPath    = L"Assets/BrickORM.png";
     m_fromFiles = std::filesystem::exists(albedoPath)
                && std::filesystem::exists(normalPath)
+               && std::filesystem::exists(ormPath)
                && m_albedo.CreateFromFile(device, queue, albedoPath, true)
-               && m_normal.CreateFromFile(device, queue, normalPath, false);
+               && m_normal.CreateFromFile(device, queue, normalPath, false)
+               && m_orm.CreateFromFile(device, queue, ormPath, false);   // linear data
 
     if (!m_fromFiles) {
         if (!m_albedo.CreateFromImage(device, queue, MakeBrickAlbedo(), true) ||
-            !m_normal.CreateFromImage(device, queue, MakeBrickNormal(), false))
+            !m_normal.CreateFromImage(device, queue, MakeBrickNormal(), false) ||
+            !m_orm.CreateFromImage(device, queue, MakeBrickORM(), false))
             return false;
-        LogInfo("NormalMapScene: using procedural brick textures "
-                "(drop BrickAlbedo.png / BrickNormal.png into Assets/ to override)");
+        LogInfo("NormalMapScene: using procedural brick textures (drop "
+                "BrickAlbedo/BrickNormal/BrickORM .png into Assets/ to override)");
     }
 
-    // Both SRVs side by side in one shader-visible heap = one descriptor table.
-    if (!m_srvs.Create(device, 2))
+    // All SRVs side by side in one shader-visible heap = one descriptor table.
+    if (!m_srvs.Create(device, 3))
         return false;
     m_srvs.Write(device, 0, m_albedo);
     m_srvs.Write(device, 1, m_normal);
+    m_srvs.Write(device, 2, m_orm);
     return true;
 }
 
@@ -198,12 +243,12 @@ bool NormalMapScene::BuildPipeline(const DemoContext& ctx) {
     ID3D12Device* device = ctx.device;
     m_shaders.Initialize(L"Shaders");
 
-    // b0 object CBV (param 0), b1 frame CBV (param 1), SRV table t0..t1
-    // (param 2), static anisotropic wrap sampler at s0.
+    // b0 object CBV (param 0), b1 frame CBV (param 1), SRV table t0..t2
+    // (param 2: albedo, normal+height, ORM), static aniso wrap sampler at s0.
     if (!RootSignatureBuilder()
              .Cbv(0)
              .Cbv(1)
-             .SrvTable(0, 2)
+             .SrvTable(0, 3)
              .SamplerAnisoWrap(0)
              .Build(device, m_rootSig))
         return false;
@@ -224,9 +269,11 @@ void NormalMapScene::BuildObjects() {
     m_objects.clear();
     // Ground slab: tiled so the bricks stay near their authored texel density.
     m_objects.push_back({ { 14.0f, 0.5f, 14.0f }, { 0.0f, -0.25f, 0.0f }, { 7.0f, 7.0f }, false });
-    // Static boxes.
+    // Static boxes; the tall one is forced metallic (GGX/Fresnel reference —
+    // same brick maps, conductor response).
     m_objects.push_back({ { 2.0f, 2.0f, 2.0f },  { -3.5f, 1.0f,  1.5f }, { 1.0f, 1.0f }, false });
-    m_objects.push_back({ { 1.4f, 2.8f, 1.4f },  {  3.0f, 1.4f, -0.5f }, { 0.7f, 1.4f }, false });
+    m_objects.push_back({ { 1.4f, 2.8f, 1.4f },  {  3.0f, 1.4f, -0.5f }, { 0.7f, 1.4f }, false,
+                          /*Metallic*/ 1.0f, /*RoughMult*/ 0.55f });
     // Spinning cube: shows the TBN following the surface as it rotates.
     m_objects.push_back({ { 1.6f, 1.6f, 1.6f },  {  0.0f, 2.4f,  3.0f }, { 1.0f, 1.0f }, true  });
 }
@@ -243,6 +290,7 @@ void NormalMapScene::OnUnload() {
     m_rootSig.Reset();
     m_albedo.Reset();
     m_normal.Reset();
+    m_orm.Reset();
     m_srvs.Reset();
     m_shaders.Shutdown();
     m_objects.clear();
@@ -274,6 +322,12 @@ void NormalMapScene::OnRender(const DemoContext& ctx) {
     fcb.FlipGreen      = m_flipGreen ? 1 : 0;
     fcb.ViewMode       = m_viewMode;
     fcb.GammaCorrect   = m_gammaCorrect ? 1 : 0;
+    fcb.HeightScale    = m_heightScale;
+    fcb.UsePom         = m_usePom ? 1 : 0;
+    fcb.PomShadow      = m_pomShadow ? 1 : 0;
+    fcb.PomSteps       = m_pomSteps;
+    fcb.RoughnessScale = m_roughnessScale;
+    fcb.UseMaterialMap = m_useMaterialMap ? 1 : 0;
     if (!ctx.objectCB->BindCbv(cmd, 1, fcb)) return;
 
     const XMMATRIX camVP = ctx.camera->GetViewProjection();
@@ -287,6 +341,7 @@ void NormalMapScene::OnRender(const DemoContext& ctx) {
         XMStoreFloat4x4(&cb.MVP, model * camVP);
         XMStoreFloat4x4(&cb.Model, model);
         cb.UvTiling = { o.Tiling.x * m_tilingScale, o.Tiling.y * m_tilingScale, 0, 0 };
+        cb.Material = { o.RoughMult, o.Metallic, 0, 0 };
         if (!ctx.objectCB->BindCbv(cmd, 0, cb)) continue;
         m_cube->Draw(cmd);
     }
@@ -304,8 +359,20 @@ void NormalMapScene::OnImGui() {
     ImGui::Checkbox("Gamma-correct output", &m_gammaCorrect);
     ImGui::SliderFloat("UV tiling scale", &m_tilingScale, 0.25f, 4.0f, "%.2f");
 
-    const char* modes[] = { "Lit", "Albedo only", "Geometric normals", "Mapped normals" };
-    ImGui::Combo("View", &m_viewMode, modes, 4);
+    ImGui::Separator();
+    ImGui::Checkbox("Parallax occlusion", &m_usePom);
+    ImGui::SliderFloat("Height scale", &m_heightScale, 0.0f, 0.15f, "%.3f");
+    ImGui::SliderInt("POM max steps", &m_pomSteps, 8, 64);
+    ImGui::Checkbox("Contact shadows", &m_pomShadow);
+
+    ImGui::Separator();
+    ImGui::Checkbox("ORM material map", &m_useMaterialMap);
+    ImGui::SliderFloat("Roughness scale", &m_roughnessScale, 0.25f, 2.0f, "%.2f");
+    ImGui::TextDisabled("Cook-Torrance GGX; the tall box is forced metallic.");
+
+    const char* modes[] = { "Lit", "Albedo only", "Geometric normals", "Mapped normals",
+                            "Height", "Material (ORM)" };
+    ImGui::Combo("View", &m_viewMode, modes, 6);
 
     ImGui::Separator();
     ImGui::Checkbox("Animate light", &m_animateLight);

@@ -21,7 +21,7 @@ The Sandbox app is a single executable hosting **16 interactive demos**, selecta
 | **Shadow Mapping** | Directional shadow map with hardware PCF (comparison sampler) |
 | **HDR + Bloom** | HDR render target → bright-pass → separable Gaussian blur → ACES tonemap |
 | **SSAO** | Screen-space ambient occlusion over the deferred G-buffer |
-| **Texture / Normal Mapping** | sRGB albedo + tangent-space normal maps via a per-vertex TBN basis (tangents baked by the OBJ loader), CPU-mipped WIC textures with a procedural brick fallback |
+| **Texture / Normal / PBR Mapping** | The material pipeline: sRGB albedo, tangent-space normal maps (TBN from baked tangents), parallax occlusion mapping with contact shadows (height in the normal map's alpha), and an ORM map driving a Cook-Torrance GGX BRDF; CPU-mipped WIC textures with a procedural brick fallback |
 | **Cascaded Shadow Maps** | 4-cascade CSM with bounding-sphere fit + texel snapping (stable, shimmer-free) |
 | **Job System** | Work-stealing thread pool recording DX12 command lists in parallel, with a single/multi A/B toggle |
 | **Physics: Stacks & Rain** | Hand-written rigid-body solver — stable 10-box stacks, body rain, live tunables, contact overlay |
@@ -99,7 +99,8 @@ Singularity/
 **Rendering & assets:**
 - [x] glTF-embedded texture extraction — decode GLB PNG buffers through the WIC loader so characters render textured
 - [x] `ufbx` front-end feeding the same `SkeletalMeshData` — any `.fbx` dropped into `Assets/` (e.g. a Mixamo download) appears in the Skeletal Animation character list
-- [ ] Parallax occlusion mapping and PBR material maps on top of the TBN groundwork
+- [x] Parallax occlusion mapping — height-field ray-march in tangent space (height in the normal map's alpha) with contact shadows, in the Texture / Normal Mapping demo
+- [x] PBR material maps — ORM texture (AO/roughness/metalness, glTF packing) driving a Cook-Torrance GGX BRDF in the Texture / Normal Mapping demo; image-based lighting remains a future step (metals use a small F0 ambient placeholder)
 - [ ] Exact CUBICSPLINE keyframe interpolation and sparse-accessor support in the glTF loader
 
 **Animation:**
