@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <memory>
 #include <numeric>
 
 namespace SGE {
@@ -53,6 +54,11 @@ Math::Vec4 ConvPos(float x, float y, float z, float w = 0.0f) {
 Math::Quat ConvQuat(float x, float y, float z, float w) {
     // Conjugating a rotation by the Z-mirror negates the axis' x and y parts.
     return Math::Normalize(Math::Quat(-x, -y, z, w));
+}
+// Same component mapping WITHOUT normalization — for CUBICSPLINE tangents,
+// which are derivatives of quaternion components, not unit quaternions.
+Math::Quat ConvQuatRaw(float x, float y, float z, float w) {
+    return Math::Quat(-x, -y, z, w);
 }
 
 // 16 col-major floats (column-vector convention) -> engine row-vector Mat4.
@@ -181,6 +187,11 @@ struct Gltf {
     Value root;
     std::vector<std::vector<uint8_t>> buffers;
 
+    // Backing store for materialized accessors (sparse / zero-filled): AccView
+    // pointers reference into these, so element addresses must stay stable —
+    // hence unique_ptr. Mutable so the const helper chain can lazily add to it.
+    mutable std::vector<std::unique_ptr<std::vector<uint8_t>>> materialized;
+
     const Value* accessors   = nullptr;
     const Value* bufferViews = nullptr;
     const Value* nodes       = nullptr;
@@ -188,6 +199,18 @@ struct Gltf {
     const Value* Arr(const char* key) const {
         const Value* v = root.Find(key);
         return v && v->IsArray() ? v : nullptr;
+    }
+
+    // Resolve a bufferView (+extra offset) to raw bytes; nullptr on any error.
+    const uint8_t* ViewBytes(int viewIdx, size_t extraOffset, size_t needBytes) const {
+        if (!bufferViews || viewIdx < 0 || size_t(viewIdx) >= bufferViews->Size())
+            return nullptr;
+        const Value& view = (*bufferViews)[size_t(viewIdx)];
+        const size_t buf = size_t(view.GetNumber("buffer"));
+        if (buf >= buffers.size()) return nullptr;
+        const size_t off = size_t(view.GetNumber("byteOffset", 0)) + extraOffset;
+        if (off + needBytes > buffers[buf].size()) return nullptr;
+        return buffers[buf].data() + off;
     }
 };
 
@@ -205,42 +228,110 @@ AccView GetAccessor(const Gltf& g, int index) {
     if (!g.accessors || index < 0 || size_t(index) >= g.accessors->Size()) return av;
     const Value& acc = (*g.accessors)[size_t(index)];
 
-    if (acc.Find("sparse"))
-        LogWarn("GltfLoader: sparse accessor encountered — sparse data ignored");
-
     const int compType = acc.GetInt("componentType");
     const int comps    = CompCount(acc.GetString("type"));
     const size_t count = size_t(acc.GetNumber("count"));
     const size_t elem  = CompSize(compType) * size_t(comps);
     if (elem == 0 || count == 0) return av;
 
-    const Value* bvIdx = acc.Find("bufferView");
-    if (!bvIdx || !g.bufferViews) return av;               // zero-filled accessor: unsupported
-    const size_t bv = size_t(bvIdx->Number);
-    if (bv >= g.bufferViews->Size()) return av;
-    const Value& view = (*g.bufferViews)[bv];
-
-    const size_t buf = size_t(view.GetNumber("buffer"));
-    if (buf >= g.buffers.size()) return av;
-    const auto& bytes = g.buffers[buf];
-
-    const size_t viewOff = size_t(view.GetNumber("byteOffset", 0));
-    const size_t viewLen = size_t(view.GetNumber("byteLength", 0));
-    const size_t accOff  = size_t(acc.GetNumber("byteOffset", 0));
-    const size_t stride  = size_t(view.GetNumber("byteStride", 0));
-
-    av.stride     = stride ? stride : elem;
     av.count      = count;
     av.compType   = compType;
     av.comps      = comps;
     av.normalized = acc.GetBool("normalized");
 
-    const size_t end = viewOff + accOff + (count - 1) * av.stride + elem;
-    if (end > bytes.size() || (viewLen && accOff + (count - 1) * av.stride + elem > viewLen)) {
-        LogError("GltfLoader: accessor range exceeds buffer");
+    const Value* sparse = acc.Find("sparse");
+    const Value* bvIdx  = acc.Find("bufferView");
+
+    // Fast path: plain view-backed accessor, point straight into the buffer.
+    if (!sparse && bvIdx) {
+        const size_t bv = size_t(bvIdx->Number);
+        if (!g.bufferViews || bv >= g.bufferViews->Size()) return AccView{};
+        const Value& view = (*g.bufferViews)[bv];
+
+        const size_t buf = size_t(view.GetNumber("buffer"));
+        if (buf >= g.buffers.size()) return AccView{};
+        const auto& bytes = g.buffers[buf];
+
+        const size_t viewOff = size_t(view.GetNumber("byteOffset", 0));
+        const size_t viewLen = size_t(view.GetNumber("byteLength", 0));
+        const size_t accOff  = size_t(acc.GetNumber("byteOffset", 0));
+        const size_t stride  = size_t(view.GetNumber("byteStride", 0));
+
+        av.stride = stride ? stride : elem;
+        const size_t end = viewOff + accOff + (count - 1) * av.stride + elem;
+        if (end > bytes.size() ||
+            (viewLen && accOff + (count - 1) * av.stride + elem > viewLen)) {
+            LogError("GltfLoader: accessor range exceeds buffer");
+            return AccView{};
+        }
+        av.base = bytes.data() + viewOff + accOff;
         return av;
     }
-    av.base = bytes.data() + viewOff + accOff;
+
+    // Materialized path: sparse accessors and view-less (all-zero) accessors
+    // get tightly-packed owned storage; base data is copied (or zeroed), then
+    // sparse substitutions overwrite the listed elements.
+    auto data = std::make_unique<std::vector<uint8_t>>(count * elem, uint8_t(0));
+
+    if (bvIdx) {
+        const size_t bv = size_t(bvIdx->Number);
+        if (!g.bufferViews || bv >= g.bufferViews->Size()) return AccView{};
+        const Value& view    = (*g.bufferViews)[bv];
+        const size_t buf     = size_t(view.GetNumber("buffer"));
+        if (buf >= g.buffers.size()) return AccView{};
+        const auto&  bytes   = g.buffers[buf];
+        const size_t viewOff = size_t(view.GetNumber("byteOffset", 0));
+        const size_t accOff  = size_t(acc.GetNumber("byteOffset", 0));
+        const size_t stride0 = size_t(view.GetNumber("byteStride", 0));
+        const size_t stride  = stride0 ? stride0 : elem;
+        if (viewOff + accOff + (count - 1) * stride + elem > bytes.size()) {
+            LogError("GltfLoader: sparse base range exceeds buffer");
+            return AccView{};
+        }
+        const uint8_t* src = bytes.data() + viewOff + accOff;
+        for (size_t e = 0; e < count; ++e)
+            std::memcpy(data->data() + e * elem, src + e * stride, elem);
+    }
+
+    if (sparse) {
+        const size_t scount = size_t(sparse->GetNumber("count"));
+        const Value* sIdx   = sparse->Find("indices");
+        const Value* sVal   = sparse->Find("values");
+        if (!sIdx || !sVal || scount == 0) {
+            LogError("GltfLoader: malformed sparse accessor");
+            return AccView{};
+        }
+        const int    idxType = sIdx->GetInt("componentType");
+        const size_t idxSize = CompSize(idxType);
+        const uint8_t* idxBytes = g.ViewBytes(sIdx->GetInt("bufferView", -1),
+                                              size_t(sIdx->GetNumber("byteOffset", 0)),
+                                              scount * idxSize);
+        const uint8_t* valBytes = g.ViewBytes(sVal->GetInt("bufferView", -1),
+                                              size_t(sVal->GetNumber("byteOffset", 0)),
+                                              scount * elem);
+        if (!idxBytes || !valBytes || idxSize == 0) {
+            LogError("GltfLoader: sparse accessor data out of range");
+            return AccView{};
+        }
+        for (size_t k = 0; k < scount; ++k) {
+            uint32_t target = 0;
+            switch (idxType) {
+                case CT_UBYTE:  target = idxBytes[k]; break;
+                case CT_USHORT: { uint16_t v; std::memcpy(&v, idxBytes + k * 2, 2); target = v; break; }
+                case CT_UINT:   { uint32_t v; std::memcpy(&v, idxBytes + k * 4, 4); target = v; break; }
+                default: LogError("GltfLoader: bad sparse index type"); return AccView{};
+            }
+            if (target >= count) {
+                LogError("GltfLoader: sparse index out of range");
+                return AccView{};
+            }
+            std::memcpy(data->data() + size_t(target) * elem, valBytes + k * elem, elem);
+        }
+    }
+
+    av.stride = elem;
+    av.base   = data->data();
+    g.materialized.push_back(std::move(data));
     return av;
 }
 
@@ -549,11 +640,14 @@ void LoadMaterial(const Gltf& g, const Value& prims,
 
 // --- animation extraction -----------------------------------------------------------
 
-// Copies one sampler's keys. CUBICSPLINE stores triplets (in-tangent, value,
-// out-tangent) per key: we keep only the values (linear approximation).
-template <typename PushFn>
-bool ReadSampler(const Gltf& g, const Value& sampler, std::vector<float>& times,
-                 PushFn&& pushValue, bool& warnedInterp)
+// Copies one sampler's keys into a channel, exactly: LINEAR and STEP as-is;
+// CUBICSPLINE stores per-key triplets (in-tangent, value, out-tangent), which
+// land in the channel's InTan/Values/OutTan for exact Hermite sampling.
+// readValue converts an output element to engine space; readTangent converts a
+// tangent element (same mapping WITHOUT normalization — tangents are not unit).
+template <typename Channel, typename ReadValueFn, typename ReadTangentFn>
+bool ReadSampler(const Gltf& g, const Value& sampler, Channel& ch,
+                 ReadValueFn&& readValue, ReadTangentFn&& readTangent)
 {
     const AccView in  = GetAccessor(g, sampler.GetInt("input", -1));
     const AccView val = GetAccessor(g, sampler.GetInt("output", -1));
@@ -561,18 +655,22 @@ bool ReadSampler(const Gltf& g, const Value& sampler, std::vector<float>& times,
 
     const std::string_view interp = sampler.GetString("interpolation", "LINEAR");
     const bool cubic = interp == "CUBICSPLINE";
-    if (interp != "LINEAR" && !warnedInterp) {
-        LogWarn(std::format("GltfLoader: {} interpolation approximated as LINEAR",
-                            std::string(interp)));
-        warnedInterp = true;
-    }
+    ch.Interp = cubic              ? Anim::Interpolation::CubicSpline
+              : interp == "STEP"   ? Anim::Interpolation::Step
+                                   : Anim::Interpolation::Linear;
     if (cubic && val.count != in.count * 3) return false;
     if (!cubic && val.count < in.count) return false;
 
-    times.resize(in.count);
+    ch.Times.resize(in.count);
     for (size_t k = 0; k < in.count; ++k) {
-        times[k] = ReadF(in, k, 0);
-        pushValue(val, cubic ? k * 3 + 1 : k);
+        ch.Times[k] = ReadF(in, k, 0);
+        if (cubic) {
+            ch.InTan.push_back(readTangent(val, k * 3 + 0));
+            ch.Values.push_back(readValue(val, k * 3 + 1));
+            ch.OutTan.push_back(readTangent(val, k * 3 + 2));
+        } else {
+            ch.Values.push_back(readValue(val, k));
+        }
     }
     return true;
 }
@@ -583,7 +681,19 @@ void LoadAnimations(const Gltf& g, const std::vector<int>& nodeToJoint,
     const Value* animations = g.Arr("animations");
     if (!animations) return;
 
-    bool warnedInterp = false;
+    const auto readVec3 = [](const AccView& v, size_t k) {
+        return ConvPos(ReadF(v, k, 0), ReadF(v, k, 1), ReadF(v, k, 2));
+    };
+    const auto readScale = [](const AccView& v, size_t k) {
+        return Math::Vec4(ReadF(v, k, 0), ReadF(v, k, 1), ReadF(v, k, 2), 0.0f);
+    };
+    const auto readQuat = [](const AccView& v, size_t k) {
+        return ConvQuat(ReadF(v, k, 0), ReadF(v, k, 1), ReadF(v, k, 2), ReadF(v, k, 3));
+    };
+    const auto readQuatTan = [](const AccView& v, size_t k) {
+        return ConvQuatRaw(ReadF(v, k, 0), ReadF(v, k, 1), ReadF(v, k, 2), ReadF(v, k, 3));
+    };
+
     for (size_t a = 0; a < animations->Size(); ++a) {
         const Value& anim = (*animations)[a];
         const Value* channels = anim.Find("channels");
@@ -610,26 +720,13 @@ void LoadAnimations(const Gltf& g, const std::vector<int>& nodeToJoint,
 
             bool ok = true;
             if (path == "translation") {
-                ok = ReadSampler(g, sampler, track.Translation.Times,
-                    [&](const AccView& v, size_t k) {
-                        track.Translation.Values.push_back(
-                            ConvPos(ReadF(v, k, 0), ReadF(v, k, 1), ReadF(v, k, 2)));
-                    }, warnedInterp);
+                ok = ReadSampler(g, sampler, track.Translation, readVec3, readVec3);
                 if (!ok) track.Translation = {};
             } else if (path == "rotation") {
-                ok = ReadSampler(g, sampler, track.Rotation.Times,
-                    [&](const AccView& v, size_t k) {
-                        track.Rotation.Values.push_back(
-                            ConvQuat(ReadF(v, k, 0), ReadF(v, k, 1),
-                                     ReadF(v, k, 2), ReadF(v, k, 3)));
-                    }, warnedInterp);
+                ok = ReadSampler(g, sampler, track.Rotation, readQuat, readQuatTan);
                 if (!ok) track.Rotation = {};
             } else if (path == "scale") {
-                ok = ReadSampler(g, sampler, track.Scale.Times,
-                    [&](const AccView& v, size_t k) {
-                        track.Scale.Values.push_back(Math::Vec4(
-                            ReadF(v, k, 0), ReadF(v, k, 1), ReadF(v, k, 2), 0.0f));
-                    }, warnedInterp);
+                ok = ReadSampler(g, sampler, track.Scale, readScale, readScale);
                 if (!ok) track.Scale = {};
             }
             // "weights" (morph targets) fall through: unsupported.

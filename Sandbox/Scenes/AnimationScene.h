@@ -7,7 +7,9 @@
 #include "Renderer/ShaderLibrary.h"
 #include "Renderer/DX12/RootSignature.h"
 #include "Renderer/DX12/GraphicsPipeline.h"
+#include "Renderer/DX12/ComputePipeline.h"
 #include "Renderer/DX12/DynamicUploadBuffer.h"
+#include "Renderer/DX12/GpuBuffer.h"
 #include "Renderer/DX12/SrvHeap.h"
 #include "Renderer/DX12/Texture2D.h"
 
@@ -50,6 +52,7 @@ private:
         SGE::SkeletalMeshData Data;
         SGE::SkinnedMesh      Mesh;
         SGE::Texture2D        Tex;              // glTF base-color texture, or 1x1 white
+        std::vector<SGE::Anim::RootMotion> RootMotions;  // parallel to Data.Clips
         bool                  HasTexture = false;
         bool                  Loaded     = false;
     };
@@ -60,17 +63,33 @@ private:
     struct Instance {
         SGE::Anim::AnimationPlayer        Player;
         SGE::Anim::AnimationPlayer        PrevPlayer;   // fading out
+        SGE::Anim::AnimationPlayer        AddPlayer;    // additive layer clip
         float                             Fade = 1.0f;  // 1 = no crossfade running
         float                             TimeOffset = 0.0f;
         float                             X = 0.0f, Z = 0.0f;
-        std::vector<SGE::Anim::JointPose> Pose, PrevPose;
+        DirectX::XMFLOAT2                 RootOffset{ 0.0f, 0.0f };  // accumulated travel
+        std::vector<SGE::Anim::JointPose> Pose, PrevPose, AddPose;
         std::vector<SGE::Math::Mat4>      Globals, Palette;
     };
+
+    // --- GPU crowd mode: compute pose evaluation + one instanced draw ---
+    struct GpuCrowd {
+        SGE::GpuBuffer Clip;       // baked local TRS: frames x joints x 3 float4
+        SGE::GpuBuffer Parents;    // joints x uint (0xFFFFFFFF = root)
+        SGE::GpuBuffer Ibm;        // joints x 4 float4 (inverse binds, row layout)
+        SGE::GpuBuffer Palettes;   // UAV: instances x joints x 4 float4
+        uint32_t Frames    = 0;
+        int      BakedChar = -1;
+        int      BakedClip = -1;
+        uint32_t Capacity  = 0;    // instance count the palette buffer holds
+    };
+    bool BuildGpuCrowd(const SGE::DemoContext& ctx);
 
     bool BuildPipelines(const SGE::DemoContext& ctx);
     void RebuildInstances();               // grid size / character changed
     void SelectClip(int clip);             // same character: crossfades
-    void EvaluateInstance(Instance& inst); // sample -> blend -> globals -> palette
+    void RebuildAdditive();                // layer clip / mask root changed
+    void EvaluateInstance(Instance& inst); // sample -> blend -> additive -> palette
     DirectX::XMMATRIX InstanceMatrix(const Instance& inst) const;
 
     std::vector<Character> m_chars;   // 2 glTF samples + every *.fbx found in Assets/
@@ -84,11 +103,38 @@ private:
     SGE::ShaderLibrary       m_shaders;
     SGE::RootSignature       m_skinRootSig;
     SGE::RootSignature       m_lineRootSig;
+    SGE::RootSignature       m_poseRootSig;   // compute: pose evaluation
+    SGE::RootSignature       m_crowdRootSig;  // graphics: instanced crowd draw
     SGE::GraphicsPipeline    m_skinPSO;
     SGE::GraphicsPipeline    m_gridPSO;   // depth-tested (ground grid)
     SGE::GraphicsPipeline    m_bonePSO;   // depth-off x-ray (skeleton overlay)
+    SGE::ComputePipeline     m_posePSO;
+    SGE::GraphicsPipeline    m_crowdPSO;
     SGE::DynamicUploadBuffer m_arena;     // per-frame bone palettes + line vertices
     SGE::SrvHeap             m_srvs;      // slot per character: base-color texture
+    GpuCrowd                 m_gpu;
+
+    bool  m_gpuMode  = false;
+    int   m_gpuGridN = 32;         // GPU crowd is N x N instances
+    float m_gpuTime  = 0.0f;
+    bool  m_gpuReady = false;
+
+    // Additive layer: a second clip's delta (vs its first frame) composed on
+    // top of the base clip, optionally restricted to one joint's subtree.
+    bool  m_addEnabled = false;
+    int   m_addClip    = 0;
+    float m_addWeight  = 1.0f;
+    int   m_maskJoint  = -1;       // -1 = all joints; else subtree root
+    std::vector<SGE::Anim::JointPose> m_addRef;  // layer clip's frame-0 pose
+    std::vector<float>                m_mask;    // per-joint weights
+
+    // Animation events: markers edited on the active clip; firings from the
+    // hero instance (grid slot 0) land in a small log.
+    std::vector<std::string> m_eventLog;
+    float m_eventFlash    = 0.0f;         // seconds left on the "fired" pulse
+    char  m_eventName[32] = "footstep";
+
+    bool  m_applyRootMotion = true;  // extracted travel moves the instances
 
     bool  m_playing      = true;
     float m_speed        = 1.0f;

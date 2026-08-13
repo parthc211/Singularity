@@ -4,13 +4,14 @@
 //
 // Supports: .glb (binary container) and .gltf with external or base64
 // data-URI buffers; accessors over interleaved or tight buffer views with all
-// component types incl. normalized integers; triangle primitives (indexed or
-// not); skins (inverse bind matrices, <= 256 joints); animations with
-// translation/rotation/scale channels (LINEAR native; STEP and CUBICSPLINE
-// are approximated as linear and logged).
+// component types incl. normalized integers, plus SPARSE and view-less
+// (zero-filled) accessors (materialized into owned storage); triangle
+// primitives (indexed or not); skins (inverse bind matrices, <= 256 joints);
+// animations with translation/rotation/scale channels — LINEAR, STEP and
+// CUBICSPLINE all sampled exactly (Hermite with per-key tangents).
 //
-// Not supported (logged when encountered): sparse accessors, morph targets,
-// non-triangle primitive modes, multiple skins (first one wins).
+// Not supported (logged when encountered): morph targets, non-triangle
+// primitive modes, multiple skins (first one wins).
 //
 // Conventions: glTF is right-handed +Y-up with column-major matrices; the
 // engine is left-handed +Y-up row-vector. Conversion happens at import:

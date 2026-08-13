@@ -12,6 +12,26 @@ RootSignatureBuilder& RootSignatureBuilder::Cbv(UINT reg, D3D12_SHADER_VISIBILIT
     return *this;
 }
 
+RootSignatureBuilder& RootSignatureBuilder::Srv(UINT reg, D3D12_SHADER_VISIBILITY vis)
+{
+    D3D12_ROOT_PARAMETER p          = {};
+    p.ParameterType                 = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    p.Descriptor.ShaderRegister     = reg;
+    p.ShaderVisibility              = vis;
+    m_params.push_back(p);
+    return *this;
+}
+
+RootSignatureBuilder& RootSignatureBuilder::Uav(UINT reg, D3D12_SHADER_VISIBILITY vis)
+{
+    D3D12_ROOT_PARAMETER p          = {};
+    p.ParameterType                 = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    p.Descriptor.ShaderRegister     = reg;
+    p.ShaderVisibility              = vis;
+    m_params.push_back(p);
+    return *this;
+}
+
 RootSignatureBuilder& RootSignatureBuilder::SrvTable(UINT baseReg, UINT count,
                                                      D3D12_SHADER_VISIBILITY vis)
 {

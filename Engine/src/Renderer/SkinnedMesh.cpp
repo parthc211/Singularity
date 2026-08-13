@@ -27,11 +27,16 @@ bool SkinnedMesh::Upload(ID3D12Device*                     device,
 
 void SkinnedMesh::Draw(ID3D12GraphicsCommandList* cmd) const
 {
+    DrawInstanced(cmd, 1);
+}
+
+void SkinnedMesh::DrawInstanced(ID3D12GraphicsCommandList* cmd, uint32_t instances) const
+{
     auto vbv = m_vertexBuffer.GetView();
     auto ibv = m_indexBuffer.GetView();
     cmd->IASetVertexBuffers(0, 1, &vbv);
     cmd->IASetIndexBuffer(&ibv);
-    cmd->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
+    cmd->DrawIndexedInstanced(m_indexCount, instances, 0, 0, 0);
 }
 
 void SkinnedMesh::Reset()

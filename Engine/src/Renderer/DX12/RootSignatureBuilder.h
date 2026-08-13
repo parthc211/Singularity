@@ -31,6 +31,14 @@ public:
     RootSignatureBuilder& Cbv(UINT reg,
                               D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL);
 
+    // Root descriptor SRV/UAV at t<reg>/u<reg> — raw or structured BUFFERS
+    // only (textures need a descriptor table). Bind with
+    // SetGraphicsRoot/SetComputeRoot ShaderResourceView/UnorderedAccessView.
+    RootSignatureBuilder& Srv(UINT reg,
+                              D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL);
+    RootSignatureBuilder& Uav(UINT reg,
+                              D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL);
+
     // Descriptor table of `count` contiguous SRVs starting at t<baseReg>.
     RootSignatureBuilder& SrvTable(UINT baseReg, UINT count,
                                    D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_PIXEL);

@@ -22,6 +22,9 @@ public:
                 const std::vector<uint32_t>&      indices);
 
     void Draw(ID3D12GraphicsCommandList* cmd) const;
+    // One draw for a whole crowd — the VS distinguishes instances via
+    // SV_InstanceID (e.g. indexing a GPU-computed palette buffer).
+    void DrawInstanced(ID3D12GraphicsCommandList* cmd, uint32_t instances) const;
 
     void Reset();
 

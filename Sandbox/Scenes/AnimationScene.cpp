@@ -12,6 +12,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 
@@ -26,6 +27,22 @@ struct FrameCB { XMFLOAT4 LightDir; XMFLOAT4 CameraPos; };
 struct LineCB  { XMFLOAT4X4 Transform; };
 
 struct LineVertex { float pos[3]; float color[3]; };
+
+// Must match AnimPose.hlsl / CrowdSkinned.hlsl.
+struct PoseParamsCB {
+    uint32_t JointCount, FrameCount, InstanceCount;
+    float    Duration, FrameRate, Time, TimeOffset, _pad;
+};
+struct CrowdFrameCB {
+    XMFLOAT4X4 ViewProj;
+    XMFLOAT4   LightDir, CameraPos, Tint;
+    uint32_t   JointCount, GridN;
+    float      Spacing, Scale;
+    float      Yaw, _pad[3];
+};
+
+constexpr float  kCrowdBakeHz     = 30.0f;
+constexpr float  kCrowdTimeOffset = 0.37f;   // must match Instance::TimeOffset
 
 constexpr int   kMaxGrid  = 8;      // up to 8x8 = 64 instances
 constexpr float kSpacing  = 2.0f;   // world units between grid instances
@@ -87,7 +104,83 @@ bool AnimationScene::BuildPipelines(const DemoContext& ctx) {
     if (!m_gridPSO.Create(device, ld))
         return false;
     ld.depthEnable = false;                 // skeleton draws through the mesh
-    return m_bonePSO.Create(device, ld);
+    if (!m_bonePSO.Create(device, ld))
+        return false;
+
+    // --- GPU crowd: compute pose evaluation (b0 + 3 root SRVs + UAV) and the
+    //     instanced draw (b0 + palette root SRV in the VS). ---
+    if (!RootSignatureBuilder()
+             .Cbv(0).Srv(0).Srv(1).Srv(2).Uav(0)
+             .Build(device, m_poseRootSig, D3D12_ROOT_SIGNATURE_FLAG_NONE))
+        return false;
+    auto cs = m_shaders.GetOrCompile(L"AnimPose.hlsl", "CSMain", "cs_6_0");
+    if (!cs || !m_posePSO.Create(device, m_poseRootSig.Get(), cs))
+        return false;
+
+    if (!RootSignatureBuilder()
+             .Cbv(0)
+             .Srv(0, D3D12_SHADER_VISIBILITY_VERTEX)
+             .Build(device, m_crowdRootSig))
+        return false;
+    auto cvs = m_shaders.GetOrCompile(L"CrowdSkinned.hlsl", "VSMain", "vs_6_0");
+    auto cps = m_shaders.GetOrCompile(L"CrowdSkinned.hlsl", "PSMain", "ps_6_0");
+    if (!cvs || !cps) return false;
+    GraphicsPipelineDesc cd;
+    cd.rootSignature = m_crowdRootSig.Get();
+    cd.vs = cvs; cd.ps = cps;
+    cd.rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    return m_crowdPSO.Create(device, cd);
+}
+
+bool AnimationScene::BuildGpuCrowd(const DemoContext& ctx) {
+    const Character& c = m_chars[size_t(m_active)];
+    if (!c.Loaded || c.Data.Clips.empty()) return false;
+    const Anim::Skeleton&      sk   = c.Data.Skeleton;
+    const Anim::AnimationClip& clip = c.Data.Clips[size_t(m_clipIndex)];
+    if (clip.Duration <= 0.0f) return false;
+
+    // Buffers may still be referenced by in-flight frames.
+    ctx.renderer->WaitForGPU();
+
+    // Bake the clip's LOCAL pose at a fixed rate: per (frame, joint) three
+    // float4s (T, R, S) — the compute shader interpolates between frames.
+    const uint32_t joints = sk.JointCount();
+    const uint32_t frames = uint32_t(std::ceil(clip.Duration * kCrowdBakeHz)) + 1;
+    std::vector<XMFLOAT4> baked;
+    baked.reserve(size_t(frames) * joints * 3);
+    std::vector<Anim::JointPose> pose;
+    for (uint32_t f = 0; f < frames; ++f) {
+        const float t = std::min(float(f) / kCrowdBakeHz, clip.Duration);
+        Anim::SampleClip(sk, clip, t, pose);
+        for (uint32_t j = 0; j < joints; ++j) {
+            float T[4], R[4], S[4];
+            _mm_storeu_ps(T, pose[j].T.v);
+            _mm_storeu_ps(R, pose[j].R.v);
+            _mm_storeu_ps(S, pose[j].S.v);
+            baked.push_back({ T[0], T[1], T[2], 0.0f });
+            baked.push_back({ R[0], R[1], R[2], R[3] });
+            baked.push_back({ S[0], S[1], S[2], 0.0f });
+        }
+    }
+
+    const uint32_t instances = uint32_t(m_gpuGridN) * uint32_t(m_gpuGridN);
+    ID3D12CommandQueue* queue = ctx.renderer->GetCommandQueue();
+    const bool ok =
+        m_gpu.Clip.Upload(ctx.device, queue, baked.data(),
+                          baked.size() * sizeof(XMFLOAT4)) &&
+        m_gpu.Parents.Upload(ctx.device, queue, sk.Parents.data(),
+                             sk.Parents.size() * sizeof(uint32_t)) &&
+        m_gpu.Ibm.Upload(ctx.device, queue, sk.InverseBind.data(),
+                         sk.InverseBind.size() * sizeof(Math::Mat4)) &&
+        m_gpu.Palettes.Create(ctx.device,
+                              uint64_t(instances) * joints * 4 * sizeof(XMFLOAT4), true);
+    if (!ok) return false;
+
+    m_gpu.Frames    = frames;
+    m_gpu.BakedChar = m_active;
+    m_gpu.BakedClip = m_clipIndex;
+    m_gpu.Capacity  = instances;
+    return true;
 }
 
 void AnimationScene::RebuildInstances() {
@@ -110,6 +203,7 @@ void AnimationScene::RebuildInstances() {
             inst.Player.SetTime(inst.TimeOffset);
         }
     }
+    RebuildAdditive();
 }
 
 void AnimationScene::SelectClip(int clip) {
@@ -128,11 +222,44 @@ void AnimationScene::SelectClip(int clip) {
     }
 }
 
+void AnimationScene::RebuildAdditive() {
+    m_addRef.clear();
+    m_mask.clear();
+    if (m_chars.empty()) return;
+    const Character& c = m_chars[size_t(m_active)];
+    if (!c.Loaded || c.Data.Clips.empty()) { m_addEnabled = false; return; }
+
+    m_addClip = std::clamp(m_addClip, 0, int(c.Data.Clips.size()) - 1);
+    const Anim::AnimationClip& layer = c.Data.Clips[size_t(m_addClip)];
+
+    // Reference = the layer clip's first frame; the layer contributes only its
+    // MOTION relative to that, so it stacks onto any base clip.
+    Anim::SampleClip(c.Data.Skeleton, layer, 0.0f, m_addRef);
+
+    // Subtree mask: parents precede children, so one forward pass suffices.
+    const uint32_t joints = c.Data.Skeleton.JointCount();
+    m_mask.assign(joints, m_maskJoint < 0 ? 1.0f : 0.0f);
+    if (m_maskJoint >= 0 && uint32_t(m_maskJoint) < joints) {
+        m_mask[size_t(m_maskJoint)] = 1.0f;
+        for (uint32_t j = 0; j < joints; ++j) {
+            const uint32_t p = c.Data.Skeleton.Parents[j];
+            if (p != Anim::kInvalidJoint && m_mask[p] > 0.0f)
+                m_mask[j] = 1.0f;
+        }
+    }
+
+    for (Instance& inst : m_instances) {
+        inst.AddPlayer.SetClip(&layer, true);
+        inst.AddPlayer.SetTime(inst.TimeOffset);
+    }
+}
+
 XMMATRIX AnimationScene::InstanceMatrix(const Instance& inst) const {
     const Character& c = m_chars[size_t(m_active)];
     return XMMatrixScaling(c.Scale, c.Scale, c.Scale)
          * XMMatrixRotationY(m_charYaw)
-         * XMMatrixTranslation(inst.X, 0.0f, inst.Z);
+         * XMMatrixTranslation(inst.X + inst.RootOffset.x, 0.0f,
+                               inst.Z + inst.RootOffset.y);
 }
 
 namespace {
@@ -181,18 +308,22 @@ void AnimationScene::OnLoad(const DemoContext& ctx) {
     add("Assets/CesiumMan.glb", "CesiumMan", 1.0f,   { 0.62f, 0.72f, 0.80f, 1.0f });
     add("Assets/Fox.glb",       "Fox",       0.025f, { 0.88f, 0.52f, 0.18f, 1.0f });
 
-    const XMFLOAT4 fbxColors[] = { { 0.55f, 0.75f, 0.45f, 1.0f }, { 0.80f, 0.60f, 0.75f, 1.0f },
-                                   { 0.85f, 0.80f, 0.45f, 1.0f }, { 0.50f, 0.70f, 0.80f, 1.0f } };
+    const XMFLOAT4 scanColors[] = { { 0.55f, 0.75f, 0.45f, 1.0f }, { 0.80f, 0.60f, 0.75f, 1.0f },
+                                    { 0.85f, 0.80f, 0.45f, 1.0f }, { 0.50f, 0.70f, 0.80f, 1.0f } };
     std::error_code ec;
-    size_t fbxCount = 0;
+    size_t scanCount = 0;
     for (const auto& entry : std::filesystem::directory_iterator("Assets", ec)) {
         if (!entry.is_regular_file()) continue;
         std::string ext = entry.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(),
                        [](unsigned char ch) { return char(std::tolower(ch)); });
-        if (ext != ".fbx") continue;
-        add(entry.path().generic_string(), entry.path().stem().string(),
-            0.0f /* auto */, fbxColors[fbxCount++ % 4]);
+        if (ext != ".fbx" && ext != ".glb" && ext != ".gltf") continue;
+        // Skip the hardcoded characters above and the loader-test fixtures.
+        const std::string stem = entry.path().stem().string();
+        if (stem == "CesiumMan" || stem == "Fox" || stem.rfind("SimpleSkin", 0) == 0)
+            continue;
+        add(entry.path().generic_string(), stem, 0.0f /* auto */,
+            scanColors[scanCount++ % 4]);
     }
 
     ID3D12CommandQueue* queue = ctx.renderer->GetCommandQueue();
@@ -207,8 +338,14 @@ void AnimationScene::OnLoad(const DemoContext& ctx) {
                                  c.Data.Vertices, c.Data.Indices);
         if (!c.Loaded)
             LogError("AnimationScene: failed to load " + c.File);
-        if (c.Loaded && c.Scale <= 0.0f)
-            c.Scale = AutoScale(c.Data);
+        if (c.Loaded) {
+            // Extract root motion from every clip (in-place clips come back
+            // untouched with HasMotion() == false).
+            for (Anim::AnimationClip& clip : c.Data.Clips)
+                c.RootMotions.push_back(Anim::ExtractRootMotion(c.Data.Skeleton, clip));
+            if (c.Scale <= 0.0f)
+                c.Scale = AutoScale(c.Data);
+        }
 
         // Base-color texture extracted from the glTF; when a character has a
         // real texture its tint becomes the material's factor. Untextured (or
@@ -246,11 +383,25 @@ void AnimationScene::OnUnload() {
     }
     m_chars.clear();
     m_srvs.Reset();
+    m_addRef.clear();
+    m_mask.clear();
+    m_addEnabled = false;
     m_skinPSO.Reset();
     m_gridPSO.Reset();
     m_bonePSO.Reset();
+    m_posePSO.Reset();
+    m_crowdPSO.Reset();
     m_skinRootSig.Reset();
     m_lineRootSig.Reset();
+    m_poseRootSig.Reset();
+    m_crowdRootSig.Reset();
+    m_gpu.Clip.Reset();
+    m_gpu.Parents.Reset();
+    m_gpu.Ibm.Reset();
+    m_gpu.Palettes.Reset();
+    m_gpu      = {};
+    m_gpuMode  = false;
+    m_gpuReady = false;
     m_arena.Shutdown();
     m_shaders.Shutdown();
     m_ready = false;
@@ -265,6 +416,11 @@ void AnimationScene::EvaluateInstance(Instance& inst) {
         const float a = f * f * (3.0f - 2.0f * f);      // smoothstep ease
         Anim::BlendPoses(inst.PrevPose, inst.Pose, a, inst.Pose);
     }
+    if (m_addEnabled && inst.AddPlayer.Clip() && m_addRef.size() == sk.JointCount()) {
+        inst.AddPlayer.Sample(sk, inst.AddPose);
+        Anim::MakeAdditive(inst.AddPose, m_addRef, inst.AddPose);
+        Anim::ApplyAdditive(inst.Pose, inst.AddPose, m_addWeight, &m_mask);
+    }
     Anim::ComputeGlobals(sk, inst.Pose, inst.Globals);
     Anim::ComputePalette(sk, inst.Globals, inst.Palette);
 }
@@ -274,16 +430,54 @@ void AnimationScene::OnUpdate(const DemoContext& ctx) {
     Character& c = m_chars[size_t(m_active)];
     if (!c.Loaded || m_instances.empty()) return;
 
+    // GPU crowd mode: the CPU does nothing per-instance — just a clock. The
+    // (re)bake runs here because OnImGui has no device access.
+    if (m_gpuMode) {
+        if (!m_gpuReady || m_gpu.BakedChar != m_active || m_gpu.BakedClip != m_clipIndex ||
+            m_gpu.Capacity != uint32_t(m_gpuGridN) * uint32_t(m_gpuGridN))
+            m_gpuReady = BuildGpuCrowd(ctx);
+        if (m_playing)
+            m_gpuTime += ctx.dt * m_speed;
+        return;
+    }
+
     if (m_playing) {
         const float dt = ctx.dt * m_speed;
+        const Anim::RootMotion* rm =
+            (m_applyRootMotion && size_t(m_clipIndex) < c.RootMotions.size() &&
+             c.RootMotions[size_t(m_clipIndex)].HasMotion())
+                ? &c.RootMotions[size_t(m_clipIndex)] : nullptr;
+
         for (Instance& inst : m_instances) {
+            const float t0 = inst.Player.Time();
             inst.Player.Update(dt);
+            if (rm) {
+                // Model-space travel -> world: rotate by the facing yaw and
+                // apply the character's display scale.
+                const Math::Vec4 d = rm->Delta(t0, inst.Player.Time());
+                const float cs = std::cos(m_charYaw), sn = std::sin(m_charYaw);
+                inst.RootOffset.x += (d.x() * cs + d.z() * sn) * c.Scale;
+                inst.RootOffset.y += (-d.x() * sn + d.z() * cs) * c.Scale;
+            }
+            if (m_addEnabled)
+                inst.AddPlayer.Update(dt);
             if (inst.Fade < 1.0f) {
                 inst.PrevPlayer.Update(dt);
                 inst.Fade = std::min(1.0f, inst.Fade + ctx.dt / std::max(m_fadeDuration, 1e-3f));
             }
         }
+
+        // Event log from the hero instance (the whole crowd fires at its own
+        // phase offsets; logging one keeps the panel readable).
+        for (const Anim::AnimationEvent* e : m_instances[0].Player.FiredEvents()) {
+            char line[80];
+            std::snprintf(line, sizeof(line), "%s  @ %.2fs", e->Name.c_str(), e->Time);
+            m_eventLog.emplace_back(line);
+            if (m_eventLog.size() > 6) m_eventLog.erase(m_eventLog.begin());
+            m_eventFlash = 0.25f;
+        }
     }
+    m_eventFlash = std::max(0.0f, m_eventFlash - ctx.dt);
 
     // The full CPU side of skinning for every instance, timed. Each instance
     // writes only its own buffers, so the parallel path needs no locks.
@@ -310,6 +504,56 @@ void AnimationScene::OnRender(const DemoContext& ctx) {
 
     m_arena.BeginFrame(ctx.renderer->GetFrameIndex());
     const XMMATRIX vp = ctx.camera->GetViewProjection();
+
+    // --- GPU crowd: dispatch the pose compute, then ONE instanced draw ---
+    if (m_gpuMode) {
+        if (!m_gpuReady) return;
+        const Anim::Skeleton& sk = c.Data.Skeleton;
+        const uint32_t instances = m_gpu.Capacity;
+
+        PoseParamsCB pp = {};
+        pp.JointCount    = sk.JointCount();
+        pp.FrameCount    = m_gpu.Frames;
+        pp.InstanceCount = instances;
+        pp.Duration      = c.Data.Clips[size_t(m_clipIndex)].Duration;
+        pp.FrameRate     = kCrowdBakeHz;
+        pp.Time          = m_gpuTime;
+        pp.TimeOffset    = kCrowdTimeOffset;
+        const auto pa = ctx.objectCB->Allocate(sizeof(pp));
+        if (!pa.Cpu) return;
+        std::memcpy(pa.Cpu, &pp, sizeof(pp));
+
+        m_gpu.Palettes.TransitionTo(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->SetComputeRootSignature(m_poseRootSig.Get());
+        cmd->SetPipelineState(m_posePSO.Get());
+        cmd->SetComputeRootConstantBufferView(0, pa.Gpu);
+        cmd->SetComputeRootShaderResourceView(1, m_gpu.Clip.Gpu());
+        cmd->SetComputeRootShaderResourceView(2, m_gpu.Parents.Gpu());
+        cmd->SetComputeRootShaderResourceView(3, m_gpu.Ibm.Gpu());
+        cmd->SetComputeRootUnorderedAccessView(4, m_gpu.Palettes.Gpu());
+        cmd->Dispatch((instances + 63) / 64, 1, 1);
+        m_gpu.Palettes.UavBarrier(cmd);
+        m_gpu.Palettes.TransitionTo(cmd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        CrowdFrameCB fc = {};
+        XMStoreFloat4x4(&fc.ViewProj, vp);
+        XMStoreFloat4(&fc.LightDir, XMVector3Normalize(XMVectorSet(0.45f, -1.0f, 0.35f, 0)));
+        fc.CameraPos  = { ctx.cameraPos[0], ctx.cameraPos[1], ctx.cameraPos[2], 1.0f };
+        fc.Tint       = c.Color;
+        fc.JointCount = sk.JointCount();
+        fc.GridN      = uint32_t(m_gpuGridN);
+        fc.Spacing    = kSpacing;
+        fc.Scale      = c.Scale;
+        fc.Yaw        = m_charYaw;
+
+        cmd->SetGraphicsRootSignature(m_crowdRootSig.Get());
+        cmd->SetPipelineState(m_crowdPSO.Get());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (!ctx.objectCB->BindCbv(cmd, 0, fc)) return;
+        cmd->SetGraphicsRootShaderResourceView(1, m_gpu.Palettes.Gpu());
+        c.Mesh.DrawInstanced(cmd, instances);
+        return;   // no per-instance CPU path, no skeleton overlay
+    }
 
     // --- characters ---
     if (m_showMesh) {
@@ -405,6 +649,9 @@ void AnimationScene::OnImGui() {
         active != m_active) {
         m_active    = active;
         m_clipIndex = 0;
+        m_addClip   = 0;
+        m_maskJoint = -1;     // mask/layer are per-skeleton
+        m_eventLog.clear();
         RebuildInstances();   // new skeleton — no crossfade across characters
     }
 
@@ -439,6 +686,93 @@ void AnimationScene::OnImGui() {
         } else {
             ImGui::TextDisabled("(scrubbing available with a 1x1 grid)");
         }
+
+        // --- root motion ---
+        ImGui::Separator();
+        ImGui::Checkbox("Apply root motion", &m_applyRootMotion);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset positions"))
+            for (Instance& inst : m_instances)
+                inst.RootOffset = { 0.0f, 0.0f };
+        if (size_t(m_clipIndex) < c.RootMotions.size() &&
+            c.RootMotions[size_t(m_clipIndex)].HasMotion()) {
+            const Anim::RootMotion& rm = c.RootMotions[size_t(m_clipIndex)];
+            const float travel = Math::Length3(rm.At(rm.Duration)) * c.Scale;
+            ImGui::TextDisabled("Extracted: %.2fm per loop (%.2f m/s)",
+                                travel, rm.Duration > 0 ? travel / rm.Duration : 0.0f);
+        } else {
+            ImGui::TextDisabled("Clip is authored in place — no root motion to "
+                                "extract.\nDrop a Mixamo FBX (without \"in place\") "
+                                "into Assets/ to see characters travel.");
+        }
+
+        // --- additive layer ---
+        ImGui::Separator();
+        if (ImGui::Checkbox("Additive layer", &m_addEnabled) && m_addEnabled)
+            RebuildAdditive();
+        if (m_addEnabled) {
+            std::vector<const char*> clipNames2;
+            for (const auto& cl : c.Data.Clips) clipNames2.push_back(cl.Name.c_str());
+            int layer = m_addClip;
+            if (ImGui::Combo("Layer clip", &layer, clipNames2.data(), int(clipNames2.size())) &&
+                layer != m_addClip) {
+                m_addClip = layer;
+                RebuildAdditive();
+            }
+            ImGui::SliderFloat("Layer weight", &m_addWeight, 0.0f, 1.0f, "%.2f");
+
+            // Mask: whole skeleton or one joint's subtree.
+            std::vector<const char*> maskNames;
+            maskNames.push_back("All joints");
+            for (const auto& n : c.Data.Skeleton.Names) maskNames.push_back(n.c_str());
+            int mask = m_maskJoint + 1;
+            if (ImGui::Combo("Mask subtree", &mask, maskNames.data(), int(maskNames.size())) &&
+                mask - 1 != m_maskJoint) {
+                m_maskJoint = mask - 1;
+                RebuildAdditive();
+            }
+            if (c.Data.Clips.size() < 2)
+                ImGui::TextDisabled("(one clip: layering it on itself — most useful\n"
+                                    "on multi-clip characters like the Fox)");
+        }
+
+        // --- animation events ---
+        ImGui::Separator();
+        ImGui::Text("Events");
+        if (m_eventFlash > 0.0f) {
+            ImGui::SameLine();
+            ImGui::TextColored({ 1.0f, 0.75f, 0.2f, 1.0f }, "* fired *");
+        }
+
+        Anim::AnimationClip& editClip = c.Data.Clips[size_t(m_clipIndex)];
+        for (size_t i = 0; i < editClip.Events.size(); ) {
+            ImGui::PushID(int(i));
+            ImGui::TextDisabled("%5.2fs  %s", editClip.Events[i].Time,
+                                editClip.Events[i].Name.c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x"))
+                editClip.Events.erase(editClip.Events.begin() + ptrdiff_t(i));
+            else
+                ++i;
+            ImGui::PopID();
+        }
+
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::InputText("##eventname", m_eventName, sizeof(m_eventName));
+        ImGui::SameLine();
+        if (ImGui::Button("Add at current time") && !m_instances.empty()) {
+            editClip.Events.push_back({ m_instances[0].Player.Time(), m_eventName });
+            std::sort(editClip.Events.begin(), editClip.Events.end(),
+                      [](const Anim::AnimationEvent& a, const Anim::AnimationEvent& b) {
+                          return a.Time < b.Time;
+                      });
+        }
+
+        if (!m_eventLog.empty()) {
+            ImGui::TextDisabled("Recent (hero instance):");
+            for (const std::string& line : m_eventLog)
+                ImGui::TextDisabled("  %s", line.c_str());
+        }
     }
 
     ImGui::Separator();
@@ -451,6 +785,20 @@ void AnimationScene::OnImGui() {
     ImGui::TextDisabled("pose pipeline, %zu char(s): serial %.3f ms | jobs %.3f ms (%u workers)",
                         m_instances.size(),
                         m_msSerial, m_msJobs, m_jobs.ThreadCount());
+
+    // --- GPU crowd (compute pose evaluation) ---
+    ImGui::Separator();
+    ImGui::Checkbox("GPU crowd (compute pose evaluation)", &m_gpuMode);
+    if (m_gpuMode) {
+        ImGui::SliderInt("GPU crowd size", &m_gpuGridN, 8, 64, "%d x %d");
+        ImGui::TextDisabled("%u instances: clip sampling, nlerp, hierarchy and\n"
+                            "palettes in one compute dispatch; ONE instanced\n"
+                            "draw; CPU pose cost: zero. (Crossfade/additive/\n"
+                            "root motion/overlay are CPU-path features.)",
+                            uint32_t(m_gpuGridN) * uint32_t(m_gpuGridN));
+        if (!m_gpuReady)
+            ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "GPU crowd resources not ready");
+    }
 
     ImGui::Separator();
     ImGui::Checkbox("Mesh", &m_showMesh);         ImGui::SameLine();

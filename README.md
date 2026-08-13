@@ -101,13 +101,13 @@ Singularity/
 - [x] `ufbx` front-end feeding the same `SkeletalMeshData` — any `.fbx` dropped into `Assets/` (e.g. a Mixamo download) appears in the Skeletal Animation character list
 - [x] Parallax occlusion mapping — height-field ray-march in tangent space (height in the normal map's alpha) with contact shadows, in the Texture / Normal Mapping demo
 - [x] PBR material maps — ORM texture (AO/roughness/metalness, glTF packing) driving a Cook-Torrance GGX BRDF in the Texture / Normal Mapping demo; image-based lighting remains a future step (metals use a small F0 ambient placeholder)
-- [ ] Exact CUBICSPLINE keyframe interpolation and sparse-accessor support in the glTF loader
+- [x] Exact CUBICSPLINE keyframe interpolation and sparse-accessor support in the glTF loader (STEP is now exact too; channels carry per-key Hermite tangents, sampled natively by the animation runtime)
 
 **Animation:**
-- [ ] Additive blend layers and per-bone masks
-- [ ] Animation events
-- [ ] Root-motion extraction
-- [ ] GPU pose evaluation (compute) for very large crowds
+- [x] Additive blend layers and per-bone masks — a second clip's delta (vs its first frame) composed onto the base pose, weight-scaled and maskable to a joint subtree, in the Skeletal Animation demo
+- [x] Animation events — named timeline markers on clips; `AnimationPlayer` reports crossings with exact loop-wrap/seek/clamp semantics, editable live in the Skeletal Animation demo
+- [x] Root-motion extraction — horizontal travel stripped from the motion joint's track (vertical kept, cubic tangents adjusted) into a wrap-aware `RootMotion` delta the scene applies to instance transforms; bundled clips are authored in place, Mixamo drop-ins travel for real
+- [x] GPU pose evaluation (compute) for very large crowds — clips baked to a structured buffer; one compute dispatch samples, nlerps, propagates the hierarchy and builds all palettes per instance; the crowd renders as a single instanced draw with `SV_InstanceID`-indexed palettes (up to 64×64 = 4096 characters, zero CPU pose cost)
 
 **Physics:**
 - [ ] Sleeping/islands

@@ -90,3 +90,6 @@ target_link_libraries(imgui PUBLIC d3d12.lib dxgi.lib dwmapi.lib)
 
 add_subdirectory(Engine)
 add_subdirectory(Sandbox)
+
+enable_testing()
+add_subdirectory(Tests)
