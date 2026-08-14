@@ -21,13 +21,24 @@
 namespace SGE::Physics::ContactSolver {
 
 struct Params {
-    float Beta                 = 0.2f;      // Baumgarte position-correction factor
+    float Beta                 = 0.2f;      // position-correction factor (both modes)
     float Slop                 = 0.005f;    // penetration tolerated without correction (m)
     float RestitutionThreshold = 1.0f;      // approach speed (m/s) below which e = 0
+
+    // Split impulse (default): penetration is corrected by a SEPARATE pseudo-
+    // velocity pass that displaces bodies without changing real velocities —
+    // no injected kinetic energy, so deep overlaps resolve without launching
+    // and stacks rest calmer. false = classic Baumgarte bias for A/B.
+    bool  SplitImpulse       = true;
+    int   PositionIterations = 3;
 };
 
 void Presolve(std::vector<RigidBody>& bodies, Manifold& m, float invH, const Params& p);
 void WarmStart(std::vector<RigidBody>& bodies, Manifold& m);
 void SolveIteration(std::vector<RigidBody>& bodies, Manifold& m);
+// One Gauss-Seidel sweep of the split-impulse position pass (pseudo
+// velocities; accumulated clamp like the normal rows).
+void SolvePositionIteration(std::vector<RigidBody>& bodies, Manifold& m,
+                            float invH, const Params& p);
 
 } // namespace SGE::Physics::ContactSolver

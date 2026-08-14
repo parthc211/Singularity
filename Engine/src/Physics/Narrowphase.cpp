@@ -89,6 +89,85 @@ int ClipAgainstPlane(const ClipVert* in, int inCount, Vec4 n, float offset,
     return outCount;
 }
 
+// World-space segment (the capsule's core line, caps excluded).
+void CapsuleSegment(const RigidBody& c, Vec4& p0, Vec4& p1) {
+    Mat4 R = ToMatrix(c.Orientation);
+    float he[4]; c.Shape.Extents.Store(he);
+    const Vec4 axis = Vec4(R.r[1]);                          // local +Y in world
+    p0 = c.Position - axis * he[0];
+    p1 = c.Position + axis * he[0];
+}
+
+Vec4 ClosestOnSegment(Vec4 a, Vec4 b, Vec4 p, float& tOut) {
+    const Vec4 ab = b - a;
+    const float lenSq = LengthSq3(ab);
+    tOut = lenSq > 1e-12f ? std::clamp(Dot3(p - a, ab) / lenSq, 0.0f, 1.0f) : 0.0f;
+    return a + ab * tOut;
+}
+
+// Closest points between segments p1q1 and p2q2 (Ericson, RTCD 5.1.9).
+void ClosestPtSegmentSegment(Vec4 p1, Vec4 q1, Vec4 p2, Vec4 q2,
+                             float& s, float& t, Vec4& c1, Vec4& c2) {
+    const Vec4 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    const float A = LengthSq3(d1), E = LengthSq3(d2), F = Dot3(d2, r);
+    if (A <= 1e-12f && E <= 1e-12f) { s = t = 0.0f; c1 = p1; c2 = p2; return; }
+    if (A <= 1e-12f) {
+        s = 0.0f; t = std::clamp(F / E, 0.0f, 1.0f);
+    } else {
+        const float C = Dot3(d1, r);
+        if (E <= 1e-12f) {
+            t = 0.0f; s = std::clamp(-C / A, 0.0f, 1.0f);
+        } else {
+            const float B = Dot3(d1, d2);
+            const float denom = A * E - B * B;
+            s = denom > 1e-12f ? std::clamp((B * F - C * E) / denom, 0.0f, 1.0f) : 0.0f;
+            t = (B * s + F) / E;
+            if (t < 0.0f)      { t = 0.0f; s = std::clamp(-C / A, 0.0f, 1.0f); }
+            else if (t > 1.0f) { t = 1.0f; s = std::clamp((B - C) / A, 0.0f, 1.0f); }
+        }
+    }
+    c1 = p1 + (q1 - p1) * s;
+    c2 = p2 + (q2 - p2) * t;
+}
+
+// Sphere-vs-box core in BOX LOCAL space, shared by SphereBox and CapsuleBox.
+// margin allows near-miss (speculative) hits: pen may come back as low as
+// -margin. Outputs the local outward normal (box surface -> sphere center)
+// and the local point on the box surface.
+bool SphereVsBoxLocal(Vec4 local, float r, const float he[4], float margin,
+                      Vec4& nLocal, Vec4& onBoxLocal, float& pen) {
+    float lf[4]; local.Store(lf);
+    float cl[3];
+    bool inside = true;
+    for (int k = 0; k < 3; ++k) {
+        cl[k] = std::clamp(lf[k], -he[k], he[k]);
+        inside &= (cl[k] == lf[k]);
+    }
+    if (!inside) {
+        const Vec4 closest(cl[0], cl[1], cl[2], 0.0f);
+        const Vec4 delta = local - closest;
+        const float distSq = LengthSq3(delta);
+        if (distSq > (r + margin) * (r + margin)) return false;
+        const float dist = std::sqrt(std::max(distSq, 1e-12f));
+        nLocal     = delta / dist;
+        onBoxLocal = closest;
+        pen        = r - dist;
+    } else {
+        int   axis = 0;
+        float minDepth = FLT_MAX, sign = 1.0f;
+        for (int k = 0; k < 3; ++k) {
+            const float depth = he[k] - std::fabs(lf[k]);
+            if (depth < minDepth) { minDepth = depth; axis = k; sign = lf[k] >= 0.0f ? 1.0f : -1.0f; }
+        }
+        nLocal = AxisUnit(axis, sign);
+        float ff[4]; local.Store(ff);
+        ff[axis]   = sign * he[axis];
+        onBoxLocal = Vec4(ff[0], ff[1], ff[2], 0.0f);
+        pen        = r + minDepth;
+    }
+    return true;
+}
+
 } // namespace
 
 // ============================ sphere routines ==============================
@@ -135,56 +214,237 @@ bool SpherePlane(const RigidBody& sphere, const RigidBody& plane, Manifold& m) {
 }
 
 bool SphereBox(const RigidBody& sphere, const RigidBody& box, Manifold& m) {
-    const float r = sphere.Shape.Radius;
-
-    // Sphere center in box space.
+    // Sphere center in box space; the shared local-space core does the rest.
     Vec4 local = Rotate(Conjugate(box.Orientation), sphere.Position - box.Position);
-    float lf[4]; local.Store(lf);
     float he[4]; box.Shape.Extents.Store(he);
 
-    float cl[3];
-    bool inside = true;
-    for (int k = 0; k < 3; ++k) {
-        cl[k] = std::clamp(lf[k], -he[k], he[k]);
-        inside &= (cl[k] == lf[k]);
-    }
+    Vec4 nLocal, onBox;
+    float pen;
+    if (!SphereVsBoxLocal(local, sphere.Shape.Radius, he, 0.0f, nLocal, onBox, pen))
+        return false;
 
+    m.Normal = -Rotate(box.Orientation, nLocal);            // A (sphere) -> B (box)
     ContactPoint& cp = m.Points[0];
     cp = ContactPoint{};
-
-    if (!inside) {
-        Vec4 closest(cl[0], cl[1], cl[2], 0.0f);
-        Vec4 delta = local - closest;
-        const float distSq = LengthSq3(delta);
-        if (distSq > r * r) return false;
-
-        const float dist = std::sqrt(std::max(distSq, 1e-12f));
-        Vec4 nLocal = delta / dist;                         // box surface -> sphere center
-        m.Normal       = -Rotate(box.Orientation, nLocal);  // A (sphere) -> B (box)
-        cp.Position    = box.Position + Rotate(box.Orientation, closest);
-        cp.Penetration = r - dist;
-    } else {
-        // Center inside the box: exit through the nearest face.
-        int   axis = 0;
-        float minDepth = FLT_MAX, sign = 1.0f;
-        for (int k = 0; k < 3; ++k) {
-            const float depth = he[k] - std::fabs(lf[k]);
-            if (depth < minDepth) {
-                minDepth = depth;
-                axis     = k;
-                sign     = lf[k] >= 0.0f ? 1.0f : -1.0f;
-            }
-        }
-        Vec4 nLocal = AxisUnit(axis, sign);                 // toward the exit face
-        m.Normal = -Rotate(box.Orientation, nLocal);
-        Vec4 onFace = local;
-        float ff[4]; onFace.Store(ff);
-        ff[axis] = sign * he[axis];
-        cp.Position    = box.Position + Rotate(box.Orientation, Vec4(ff[0], ff[1], ff[2], 0.0f));
-        cp.Penetration = r + minDepth;
-    }
-    cp.FeatureId = 0;
+    cp.Position    = box.Position + Rotate(box.Orientation, onBox);
+    cp.Penetration = pen;
+    cp.FeatureId   = 0;
     m.Count = 1;
+    return true;
+}
+
+// ============================ capsule routines =============================
+
+bool SphereCapsule(const RigidBody& sphere, const RigidBody& capsule, Manifold& m) {
+    // Closest point on the capsule's core segment, then sphere-vs-sphere.
+    Vec4 p0, p1;
+    CapsuleSegment(capsule, p0, p1);
+    float t;
+    const Vec4 c = ClosestOnSegment(p0, p1, sphere.Position, t);
+
+    const Vec4  d      = c - sphere.Position;
+    const float rSum   = sphere.Shape.Radius + capsule.Shape.Radius;
+    const float distSq = LengthSq3(d);
+    if (distSq > rSum * rSum) return false;
+
+    const float dist = std::sqrt(std::max(distSq, 1e-12f));
+    const Vec4  n    = dist > 1e-6f ? d / dist : Vec4(1, 0, 0, 0);
+
+    m.Normal = n;                                            // A (sphere) -> B (capsule)
+    ContactPoint& cp = m.Points[0];
+    cp = ContactPoint{};
+    cp.Position    = (sphere.Position + n * sphere.Shape.Radius + c - n * capsule.Shape.Radius) * 0.5f;
+    cp.Penetration = rSum - dist;
+    cp.FeatureId   = 0;
+    m.Count = 1;
+    return true;
+}
+
+bool CapsulePlane(const RigidBody& capsule, const RigidBody& plane, Manifold& m) {
+    const Vec4 n = plane.Shape.Extents;
+    float pe[4]; plane.Shape.Extents.Store(pe);
+    const float d = pe[3];
+    const float r = capsule.Shape.Radius;
+
+    // Both cap centers vs the plane: a lying capsule rests on TWO contacts
+    // (endpoint index = FeatureId), a leaning one on the deeper end. The
+    // persistence margin keeps the barely-lifted end warm, like BoxPlane.
+    Vec4 ends[2];
+    CapsuleSegment(capsule, ends[0], ends[1]);
+
+    Hit hits[2];
+    int hitCount = 0;
+    bool anyTouching = false;
+    for (uint32_t i = 0; i < 2; ++i) {
+        const float signedDist = Dot3(ends[i], n) - d;
+        const float pen        = r - signedDist;
+        if (pen > -kPersistTol) {
+            hits[hitCount++] = { ends[i] - n * signedDist, pen, i };
+            anyTouching |= pen > 0.0f;
+        }
+    }
+    if (hitCount == 0 || !anyTouching) return false;
+
+    m.Normal = -n;                                           // A (capsule) -> B (plane)
+    m.Count  = uint32_t(hitCount);
+    for (int i = 0; i < hitCount; ++i) {
+        ContactPoint& cp = m.Points[i];
+        cp = ContactPoint{};
+        cp.Position    = hits[i].p;
+        cp.Penetration = hits[i].pen;
+        cp.FeatureId   = hits[i].id;
+    }
+    return true;
+}
+
+bool CapsuleCapsule(const RigidBody& a, const RigidBody& b, Manifold& m) {
+    Vec4 a0, a1, b0, b1;
+    CapsuleSegment(a, a0, a1);
+    CapsuleSegment(b, b0, b1);
+    const float rSum = a.Shape.Radius + b.Shape.Radius;
+
+    const Vec4  dA = a1 - a0, dB = b1 - b0;
+    const float lA = Length3(dA), lB = Length3(dB);
+
+    // Nearly parallel with axis overlap: emit TWO contacts (the ends of the
+    // overlap window) so a capsule lying on another rests instead of rocking.
+    if (lA > 1e-6f && lB > 1e-6f && std::fabs(Dot3(dA, dB)) > 0.999f * lA * lB) {
+        auto tOnA = [&](Vec4 p) { return Dot3(p - a0, dA) / (lA * lA); };
+        const float u0 = std::clamp(std::min(tOnA(b0), tOnA(b1)), 0.0f, 1.0f);
+        const float u1 = std::clamp(std::max(tOnA(b0), tOnA(b1)), 0.0f, 1.0f);
+        if (u1 - u0 > 1e-3f) {
+            Hit hits[2];
+            Vec4 normals[2];
+            int hitCount = 0;
+            bool anyTouching = false;
+            const float ts[2] = { u0, u1 };
+            for (uint32_t i = 0; i < 2; ++i) {
+                const Vec4 pa = a0 + dA * ts[i];
+                float s;
+                const Vec4 pb = ClosestOnSegment(b0, b1, pa, s);
+                const Vec4 d  = pb - pa;
+                const float dist = Length3(d);
+                const float pen  = rSum - dist;
+                if (pen > -kPersistTol) {
+                    const Vec4 n = dist > 1e-6f ? d / dist : Vec4(1, 0, 0, 0);
+                    normals[hitCount] = n;
+                    hits[hitCount++]  = { (pa + n * a.Shape.Radius + pb - n * b.Shape.Radius) * 0.5f,
+                                          pen, i };
+                    anyTouching |= pen > 0.0f;
+                }
+            }
+            if (hitCount > 0 && anyTouching) {
+                SortHits(hits, hitCount);
+                m.Normal = normals[0];                       // parallel: both agree
+                m.Count  = uint32_t(hitCount);
+                for (int i = 0; i < hitCount; ++i) {
+                    ContactPoint& cp = m.Points[i];
+                    cp = ContactPoint{};
+                    cp.Position    = hits[i].p;
+                    cp.Penetration = hits[i].pen;
+                    cp.FeatureId   = hits[i].id;
+                }
+                return true;
+            }
+            return false;
+        }
+    }
+
+    // General case: closest points of the two segments, sphere-vs-sphere there.
+    float s, t;
+    Vec4 c1, c2;
+    ClosestPtSegmentSegment(a0, a1, b0, b1, s, t, c1, c2);
+    const Vec4  d      = c2 - c1;
+    const float distSq = LengthSq3(d);
+    if (distSq > rSum * rSum) return false;
+
+    const float dist = std::sqrt(std::max(distSq, 1e-12f));
+    const Vec4  n    = dist > 1e-6f ? d / dist : Vec4(1, 0, 0, 0);
+
+    m.Normal = n;
+    ContactPoint& cp = m.Points[0];
+    cp = ContactPoint{};
+    cp.Position    = (c1 + n * a.Shape.Radius + c2 - n * b.Shape.Radius) * 0.5f;
+    cp.Penetration = rSum - dist;
+    cp.FeatureId   = 2;
+    m.Count = 1;
+    return true;
+}
+
+bool CapsuleBox(const RigidBody& capsule, const RigidBody& box, Manifold& m) {
+    const float r = capsule.Shape.Radius;
+    float he[4]; box.Shape.Extents.Store(he);
+
+    // Segment in box-local space.
+    Vec4 w0, w1;
+    CapsuleSegment(capsule, w0, w1);
+    const Quat invQ = Conjugate(box.Orientation);
+    const Vec4 l0 = Rotate(invQ, w0 - box.Position);
+    const Vec4 l1 = Rotate(invQ, w1 - box.Position);
+
+    // Distance from a segment point to the SOLID box is convex in t, so a
+    // fixed-count ternary search finds the closest parameter deterministically
+    // (fixed iterations keep the serial/parallel trajectories bit-identical).
+    auto distSqAt = [&](float t) {
+        float p[4]; (l0 + (l1 - l0) * t).Store(p);
+        float dsq = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            const float excess = std::max(std::fabs(p[k]) - he[k], 0.0f);
+            dsq += excess * excess;
+        }
+        return dsq;
+    };
+    float lo = 0.0f, hi = 1.0f;
+    for (int it = 0; it < 40; ++it) {
+        const float m1 = lo + (hi - lo) / 3.0f;
+        const float m2 = hi - (hi - lo) / 3.0f;
+        if (distSqAt(m1) <= distSqAt(m2)) hi = m2; else lo = m1;
+    }
+    const float tStar = 0.5f * (lo + hi);
+
+    // Candidates: the closest interior point plus both cap centers — the caps
+    // give a lying capsule its second contact. Skip tStar when it degenerates
+    // onto an endpoint.
+    struct Cand { float t; uint32_t id; };
+    Cand cands[3];
+    int  candCount = 0;
+    if (tStar > 0.02f && tStar < 0.98f) cands[candCount++] = { tStar, 0 };
+    cands[candCount++] = { 0.0f, 1 };
+    cands[candCount++] = { 1.0f, 2 };
+
+    Hit  hits[3];
+    Vec4 normalsLocal[3];
+    int  hitCount = 0;
+    bool anyTouching = false;
+    for (int c = 0; c < candCount; ++c) {
+        const Vec4 pt = l0 + (l1 - l0) * cands[c].t;
+        Vec4 nLocal, onBox;
+        float pen;
+        if (!SphereVsBoxLocal(pt, r, he, kPersistTol, nLocal, onBox, pen)) continue;
+        normalsLocal[hitCount] = nLocal;
+        hits[hitCount++] = { onBox, pen, cands[c].id };
+        anyTouching |= pen > 0.0f;
+    }
+    if (hitCount == 0 || !anyTouching) return false;
+
+    // Deepest first; its normal represents the manifold (identical for a
+    // face-resting capsule, best available in edge cases).
+    int deepest = 0;
+    for (int i = 1; i < hitCount; ++i)
+        if (hits[i].pen > hits[deepest].pen ||
+            (hits[i].pen == hits[deepest].pen && hits[i].id < hits[deepest].id))
+            deepest = i;
+
+    m.Normal = -Rotate(box.Orientation, normalsLocal[deepest]);  // A (capsule) -> B (box)
+    SortHits(hits, hitCount);
+    m.Count = uint32_t(std::min(hitCount, 2));
+    for (uint32_t i = 0; i < m.Count; ++i) {
+        ContactPoint& cp = m.Points[i];
+        cp = ContactPoint{};
+        cp.Position    = box.Position + Rotate(box.Orientation, hits[i].p);
+        cp.Penetration = hits[i].pen;
+        cp.FeatureId   = hits[i].id;
+    }
     return true;
 }
 
@@ -423,9 +683,18 @@ bool Collide(const RigidBody& a, const RigidBody& b, Manifold& m) {
     switch (a.Shape.Type) {
     case ShapeType::Sphere:
         switch (b.Shape.Type) {
-        case ShapeType::Sphere: return SphereSphere(a, b, m);
-        case ShapeType::Box:    return SphereBox(a, b, m);
-        case ShapeType::Plane:  return SpherePlane(a, b, m);
+        case ShapeType::Sphere:  return SphereSphere(a, b, m);
+        case ShapeType::Capsule: return SphereCapsule(a, b, m);
+        case ShapeType::Box:     return SphereBox(a, b, m);
+        case ShapeType::Plane:   return SpherePlane(a, b, m);
+        }
+        break;
+    case ShapeType::Capsule:
+        switch (b.Shape.Type) {
+        case ShapeType::Capsule: return CapsuleCapsule(a, b, m);
+        case ShapeType::Box:     return CapsuleBox(a, b, m);
+        case ShapeType::Plane:   return CapsulePlane(a, b, m);
+        default:                 break;                     // non-canonical order
         }
         break;
     case ShapeType::Box:

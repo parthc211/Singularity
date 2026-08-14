@@ -13,8 +13,9 @@
 add_executable(LoaderTests LoaderTests.cpp)
 add_executable(AnimationTests AnimationTests.cpp)
 add_executable(DeterminismTests DeterminismTests.cpp)
+add_executable(PhysicsTests PhysicsTests.cpp)
 
-foreach(t LoaderTests AnimationTests DeterminismTests)
+foreach(t LoaderTests AnimationTests DeterminismTests PhysicsTests)
     target_link_libraries(${t} PRIVATE SingularityEngine)
     set_property(TARGET ${t} PROPERTY FOLDER "Tests")
     add_test(NAME ${t}

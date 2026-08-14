@@ -25,23 +25,36 @@ namespace SGE::Physics {
 using BodyHandle = uint32_t;
 
 // Ordered so mixed collision pairs can be canonicalized by type value
-// (Sphere < Box < Plane); narrowphase then only needs one function per
-// unordered pair. Planes are always static and always canonical-B.
-enum class ShapeType : uint32_t { Sphere = 0, Box = 1, Plane = 2 };
+// (Sphere < Capsule < Box < Plane); narrowphase then only needs one function
+// per unordered pair. Planes are always static and always canonical-B.
+enum class ShapeType : uint32_t { Sphere = 0, Capsule = 1, Box = 2, Plane = 3 };
 
 struct alignas(16) Collider {
-    // Box: half-extents in xyz (w unused).
-    // Plane: xyz = unit normal, w = d in the plane equation n.p = d.
+    // Box:     half-extents in xyz (w unused).
+    // Capsule: Extents.x = segment HALF-LENGTH (caps not included); the axis
+    //          is local +Y; Radius = cap/side radius.
+    // Plane:   xyz = unit normal, w = d in the plane equation n.p = d.
     Math::Vec4 Extents;
-    float      Radius = 0.5f;               // Sphere only
+    float      Radius = 0.5f;               // Sphere / Capsule
     ShapeType  Type   = ShapeType::Sphere;
 };
 
 struct alignas(16) RigidBody {
     Math::Vec4 Position;
     Math::Quat Orientation;
+    // Pose at the START of the current substep — rendering interpolates
+    // between this and the current pose by the accumulator fraction, so the
+    // fixed 120 Hz sim doesn't judder against an arbitrary frame rate.
+    Math::Vec4 PrevPosition;
+    Math::Quat PrevOrientation;
     Math::Vec4 LinearVelocity;
     Math::Vec4 AngularVelocity;             // world-space, rad/s
+    // Split-impulse pseudo velocities: accumulated by the contact position
+    // pass, consumed as pure displacement at integration, then zeroed — they
+    // never mix into the real velocities, so penetration correction cannot
+    // inject kinetic energy (no "Baumgarte bounce").
+    Math::Vec4 PseudoLinearVelocity;
+    Math::Vec4 PseudoAngularVelocity;
     Math::Vec4 InvInertiaBodyDiag;          // diagonal of body-space I^-1 (zero for static)
     Math::Mat4 InvInertiaWorld;             // refreshed at the top of every substep
     float      InvMass     = 0.0f;          // 0 = static
@@ -49,7 +62,21 @@ struct alignas(16) RigidBody {
     float      Friction    = 0.5f;
     Collider   Shape;
 
-    bool IsStatic() const { return InvMass == 0.0f; }
+    // Sleeping (see PhysicsWorld's island logic): a body whose whole contact/
+    // joint island has been quiet for TimeToSleep is frozen — integration and
+    // its pair collection are skipped until something wakes the island.
+    //
+    // "Quiet" is measured by NET DISPLACEMENT from an anchor pose, not by
+    // instantaneous velocity: warm-started stacks jitter with zero-mean
+    // velocities forever, but they don't go anywhere — the anchor sees that.
+    Math::Vec4 SleepAnchorPos;              // pose when the quiet window began
+    Math::Quat SleepAnchorOrient;
+    float      SleepTimer  = 0.0f;          // seconds inside the anchor tolerance
+    bool       Sleeping    = false;
+
+    bool IsStatic()   const { return InvMass == 0.0f; }
+    // Doesn't move this step — used to skip pairs where nothing can change.
+    bool IsImmobile() const { return IsStatic() || Sleeping; }
 };
 
 } // namespace SGE::Physics

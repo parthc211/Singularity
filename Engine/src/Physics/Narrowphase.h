@@ -15,11 +15,15 @@
 
 namespace SGE::Physics::Narrowphase {
 
-bool SphereSphere(const RigidBody& a, const RigidBody& b, Manifold& m);
-bool SpherePlane (const RigidBody& sphere, const RigidBody& plane, Manifold& m);
-bool SphereBox   (const RigidBody& sphere, const RigidBody& box,   Manifold& m);
-bool BoxPlane    (const RigidBody& box,    const RigidBody& plane, Manifold& m);
-bool BoxBox      (const RigidBody& a, const RigidBody& b, Manifold& m);
+bool SphereSphere  (const RigidBody& a, const RigidBody& b, Manifold& m);
+bool SpherePlane   (const RigidBody& sphere, const RigidBody& plane, Manifold& m);
+bool SphereBox     (const RigidBody& sphere, const RigidBody& box,   Manifold& m);
+bool SphereCapsule (const RigidBody& sphere, const RigidBody& capsule, Manifold& m);
+bool CapsulePlane  (const RigidBody& capsule, const RigidBody& plane, Manifold& m);
+bool CapsuleCapsule(const RigidBody& a, const RigidBody& b, Manifold& m);
+bool CapsuleBox    (const RigidBody& capsule, const RigidBody& box, Manifold& m);
+bool BoxPlane      (const RigidBody& box,    const RigidBody& plane, Manifold& m);
+bool BoxBox        (const RigidBody& a, const RigidBody& b, Manifold& m);
 
 // Dispatch on the (already canonical) shape pair.
 bool Collide(const RigidBody& a, const RigidBody& b, Manifold& m);

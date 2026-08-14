@@ -30,6 +30,9 @@ struct alignas(16) ContactPoint {
     // Accumulated impulses (the values warm starting carries across substeps).
     float NormalImpulse     = 0.0f;
     float TangentImpulse[2] = { 0.0f, 0.0f };
+    // Split-impulse position pass accumulator — per-substep only, never
+    // warm-started (pseudo velocities are transient).
+    float PseudoImpulse     = 0.0f;
 
     // Presolve caches.
     float MassNormal     = 0.0f;            // 1 / (J M^-1 J^T) for the normal row

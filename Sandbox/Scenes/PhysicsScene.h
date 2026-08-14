@@ -7,6 +7,7 @@
 #include <DirectXMath.h>
 #include <cstdint>
 #include <random>
+#include <unordered_map>
 
 namespace SGE { class Mesh; }
 
@@ -28,7 +29,8 @@ namespace SGE { class Mesh; }
 class PhysicsScene : public SGE::DemoScene
 {
 public:
-    PhysicsScene(SGE::Mesh* cube, SGE::Mesh* sphere) : m_cube(cube), m_sphere(sphere) {}
+    PhysicsScene(SGE::Mesh* cube, SGE::Mesh* sphere, SGE::Mesh* capsule)
+        : m_cube(cube), m_sphere(sphere), m_capsule(capsule) {}
 
     const char* Name()        const override { return "Physics: Stacks & Rain"; }
     const char* Description() const override;
@@ -51,17 +53,25 @@ private:
     void SpawnSphere(DirectX::XMFLOAT3 pos, float radius, float mass);
     void SpawnBox(DirectX::XMFLOAT3 pos, DirectX::XMFLOAT3 halfExtents, float mass,
                   const SGE::Math::Quat& orientation = SGE::Math::Quat());
+    // halfLen == radius (the render mesh has that fixed proportion).
+    void SpawnCapsule(DirectX::XMFLOAT3 pos, float radius, float mass,
+                      const SGE::Math::Quat& orientation = SGE::Math::Quat());
     void SpawnStack(int count);
     void SpawnRain(int count);
     void DrawContactOverlay() const;
 
-    SGE::Mesh* m_cube   = nullptr;
-    SGE::Mesh* m_sphere = nullptr;
+    SGE::Mesh* m_cube    = nullptr;
+    SGE::Mesh* m_sphere  = nullptr;
+    SGE::Mesh* m_capsule = nullptr;
 
     SGE::World                 m_world;
     SGE::Physics::PhysicsWorld m_physics;
     SGE::JobSystem             m_jobs;
     std::mt19937               m_rng{ 1234u };
+
+    // Authored body colors — sleeping bodies render dimmed/cooled, so islands
+    // visibly "go quiet"; the original color returns on wake.
+    std::unordered_map<SGE::Physics::BodyHandle, DirectX::XMFLOAT4> m_bodyColors;
 
     // Spawn-time material defaults (live bodies keep what they were born with).
     float m_restitution = 0.2f;
@@ -70,6 +80,7 @@ private:
 
     bool  m_multithreaded = true;
     bool  m_overlay       = false;
+    bool  m_interpolate   = true;   // render-state interpolation between substeps
     float m_msSingle      = 0.0f;   // rolling averages for the A/B readout
     float m_msMulti       = 0.0f;
 

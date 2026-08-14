@@ -45,6 +45,14 @@ AABB ComputeAABB(const RigidBody& b) {
                + Abs(Vec4(R.r[2])) * he[2];
         return { b.Position - e, b.Position + e };
     }
+    case ShapeType::Capsule: {
+        // Segment endpoints (pos +- axis * halfLen) inflated by the radius.
+        Mat4 R = ToMatrix(b.Orientation);
+        float he[4]; b.Shape.Extents.Store(he);
+        Vec4 e = Abs(Vec4(R.r[1])) * he[0]                  // local +Y axis
+               + Vec4(b.Shape.Radius, b.Shape.Radius, b.Shape.Radius, 0.0f);
+        return { b.Position - e, b.Position + e };
+    }
     case ShapeType::Plane:
     default: {
         // Planes are infinite; they never enter the broadphase.

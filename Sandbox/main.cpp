@@ -78,6 +78,58 @@ static void BuildUvSphere(std::vector<SGE::MeshVertex>& verts,
     }
 }
 
+// Unit-PROPORTION capsule: radius 1, segment half-length 1 (total height 4).
+// Hemispheres are the sphere's rings shifted +-1 in Y with a cylindrical band
+// between (the equator ring is emitted twice, once per offset). Because the
+// proportion is fixed, physics capsules with halfLen == radius render exactly
+// under uniform scaling — nonuniform scaling would deform the caps.
+static void BuildUvCapsule(std::vector<SGE::MeshVertex>& verts,
+                           std::vector<uint32_t>&        indices,
+                           uint32_t stacks = 16, uint32_t slices = 24)
+{
+    struct Ring { float phi; float offset; };
+    std::vector<Ring> rings;
+    for (uint32_t r = 0; r <= stacks; ++r) {
+        const float phi = DirectX::XM_PI * float(r) / float(stacks);
+        if (r * 2 == stacks) {                          // equator: both offsets
+            rings.push_back({ phi,  1.0f });
+            rings.push_back({ phi, -1.0f });
+        } else {
+            rings.push_back({ phi, r * 2 < stacks ? 1.0f : -1.0f });
+        }
+    }
+
+    for (size_t ri = 0; ri < rings.size(); ++ri) {
+        for (uint32_t s = 0; s <= slices; ++s) {
+            const float theta = DirectX::XM_2PI * float(s) / float(slices);
+            const float sp = std::sin(rings[ri].phi), cp = std::cos(rings[ri].phi);
+            const float x = sp * std::cos(theta);
+            const float z = sp * std::sin(theta);
+            SGE::MeshVertex v;
+            v.position[0] = x; v.position[1] = cp + rings[ri].offset; v.position[2] = z;
+            v.normal[0]   = x; v.normal[1]   = cp;                    v.normal[2]   = z;
+            v.texCoord[0] = float(s) / float(slices);
+            v.texCoord[1] = float(ri) / float(rings.size() - 1);
+            v.tangent[0] = -std::sin(theta);
+            v.tangent[1] = 0.0f;
+            v.tangent[2] = std::cos(theta);
+            v.tangent[3] = 1.0f;
+            verts.push_back(v);
+        }
+    }
+    const uint32_t stride = slices + 1;
+    for (uint32_t r = 0; r + 1 < rings.size(); ++r) {
+        for (uint32_t s = 0; s < slices; ++s) {
+            const uint32_t a = r * stride + s;
+            const uint32_t b = a + 1;
+            const uint32_t c = a + stride;
+            const uint32_t d = c + 1;
+            indices.insert(indices.end(), { a, b, d }); // CW seen from outside
+            indices.insert(indices.end(), { a, d, c });
+        }
+    }
+}
+
 class SandboxApp : public SGE::Application
 {
 protected:
@@ -120,11 +172,17 @@ protected:
         if (SGE::LoadOBJ("Assets/cube.obj", verts, indices))
             m_mesh.Upload(device, GetRenderer().GetGeometryHeap(), verts, indices);
 
-        // Procedural unit sphere for the physics scenes (scaled per body).
+        // Procedural unit sphere + unit-proportion capsule for the physics
+        // scenes (both scaled per body).
         verts.clear();
         indices.clear();
         BuildUvSphere(verts, indices);
         m_sphereMesh.Upload(device, GetRenderer().GetGeometryHeap(), verts, indices);
+
+        verts.clear();
+        indices.clear();
+        BuildUvCapsule(verts, indices);
+        m_capsuleMesh.Upload(device, GetRenderer().GetGeometryHeap(), verts, indices);
 
         // Register the demo scenes. Each owns its own ECS World; they share this
         // app's cube mesh, upload arena, RenderSystem, root sig and PSO. Activate
@@ -143,7 +201,7 @@ protected:
         m_scenes.Add(std::make_unique<NormalMapScene>(&m_mesh));
         m_scenes.Add(std::make_unique<CsmScene>(&m_mesh));
         m_scenes.Add(std::make_unique<JobScene>(&m_mesh));
-        m_scenes.Add(std::make_unique<PhysicsScene>(&m_mesh, &m_sphereMesh));
+        m_scenes.Add(std::make_unique<PhysicsScene>(&m_mesh, &m_sphereMesh, &m_capsuleMesh));
         m_scenes.Add(std::make_unique<JointScene>(&m_mesh, &m_sphereMesh));
         m_scenes.Add(std::make_unique<AnimationScene>());
         m_scenes.SetActiveIndex(0, BuildContext(0.0f));
@@ -318,6 +376,7 @@ protected:
         m_objectCB.Shutdown();
         m_mesh.Reset();
         m_sphereMesh.Reset();
+        m_capsuleMesh.Reset();
         m_pipeline.Reset();
         m_rootSig.Reset();
     }
@@ -349,6 +408,7 @@ private:
     SGE::DynamicUploadBuffer m_objectCB;     // per-object constant arena (shared)
     SGE::Mesh                m_mesh;          // shared cube geometry (owned here)
     SGE::Mesh                m_sphereMesh;    // procedural unit sphere (physics scenes)
+    SGE::Mesh                m_capsuleMesh;   // unit-proportion capsule (physics scenes)
     SGE::Camera              m_camera;
     SGE::RenderSystem        m_renderSystem;  // draws Transform+Mesh entities
     SGE::SceneManager        m_scenes;        // owns + switches the demo scenes

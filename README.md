@@ -35,7 +35,7 @@ The Sandbox app is a single executable hosting **16 interactive demos**, selecta
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
-- **Physics:** a from-scratch 3D rigid-body engine (`Physics::PhysicsWorld`) built entirely on the engine's own SIMD math: sphere/box/plane colliders, SAT box-box narrowphase with Sutherland–Hodgman clipping, a warm-started sequential-impulse solver (accumulated & clamped impulses, friction cones, restitution, Baumgarte + speculative contacts), persistent manifolds, a spatial-hash broadphase, and ball/hinge/distance joints with energy-neutral NGS position correction — stepped at fixed 120 Hz substeps, single-threaded or JobSystem-parallel with bit-identical trajectories.
+- **Physics:** a from-scratch 3D rigid-body engine (`Physics::PhysicsWorld`) built entirely on the engine's own SIMD math: sphere/capsule/box/plane colliders, SAT box-box narrowphase with Sutherland–Hodgman clipping, a warm-started sequential-impulse solver (accumulated & clamped impulses, friction cones, restitution, split-impulse position correction with a Baumgarte A/B, speculative contacts), persistent manifolds, a spatial-hash broadphase, island-based sleeping (displacement-anchor quietness, whole-island wake), and ball/hinge/distance joints with energy-neutral NGS position correction — stepped at fixed 120 Hz substeps, single-threaded or JobSystem-parallel with bit-identical trajectories.
 - **Animation:** a skeletal-animation stack built on the engine's SIMD math — `Skeleton` (flat parent-before-child joint arrays, inverse binds), sparse keyframe `AnimationClip`s, cursor-cached sampling (slerp), pose blending (nlerp), single-pass pose propagation and bone-palette generation, GPU-skinned in the vertex shader (4 weights, 256-joint palette CBV).
 - **Assets:** a hand-written **glTF 2.0 loader** (own JSON parser, GLB container, accessors, skins, animations, embedded textures, base64/external buffers) with right-handed→left-handed conversion at import, feeding a format-agnostic `SkeletalMeshData`; an **FBX front-end** over the vendored single-file [ufbx](https://github.com/ufbx/ufbx) library (MIT/Unlicense — plumbing, like ImGui) targeting the same intermediate, with 30 Hz clip baking from ufbx's world matrices; plus the OBJ loader with tangent generation and WIC image loading.
 - **Scene:** a sparse-set **ECS** (`World` / `Entity` / `SparseSet`) with a `RenderSystem`, plus a `DemoScene` framework and a `SceneManager` with safe deferred scene switching.
@@ -110,11 +110,11 @@ Singularity/
 - [x] GPU pose evaluation (compute) for very large crowds — clips baked to a structured buffer; one compute dispatch samples, nlerps, propagates the hierarchy and builds all palettes per instance; the crowd renders as a single instanced draw with `SV_InstanceID`-indexed palettes (up to 64×64 = 4096 characters, zero CPU pose cost)
 
 **Physics:**
-- [ ] Sleeping/islands
-- [ ] Split-impulse contacts
-- [ ] Capsule colliders
-- [ ] Render-state interpolation between fixed steps
-- [ ] Gyroscopic term in the integrator
+- [x] Sleeping/islands — union-find islands over contacts+joints; whole-island sleep on a displacement-from-anchor quietness criterion (immune to solver jitter), pair collection and solving skipped for sleeping islands, automatic wake on contact; deterministic serial/parallel, sleeping bodies render dimmed in the physics demo
+- [x] Split-impulse contacts — penetration corrected by a pseudo-velocity position pass instead of Baumgarte bias (zero injected energy: a 0.2m overlap resolves at 0.00 m/s vs Baumgarte's 4.6 m/s launch, measured in PhysicsTests); Baumgarte kept as a live A/B toggle
+- [x] Capsule colliders — segment+radius shape with four new narrowphase pairs (vs sphere/capsule/box/plane; two-contact manifolds for lying capsules, convex ternary-search closest-point vs boxes), correct solid-capsule inertia, procedural capsule mesh in the physics demo
+- [x] Render-state interpolation between fixed steps — poses blended between the last two 120 Hz substeps by the accumulator fraction ("Fix Your Timestep"); purely cosmetic (determinism untouched), sleeping bodies bit-exact, A/B toggle in the physics demo
+- [x] Gyroscopic term in the integrator — Euler's `ω × (Iω)` coupling solved implicitly (one Newton step in body space; explicit is unstable): anisotropic bodies precess and Dzhanibekov-flip (5 flips / 10 s measured, energy ratio 1.0000, zero flips without — all asserted in PhysicsTests), with a live A/B toggle and a "Dzhanibekov flip" spawner in the demo
 
 ---
 

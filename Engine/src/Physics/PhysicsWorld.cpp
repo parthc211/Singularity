@@ -39,7 +39,9 @@ void ParallelFor(SGE::JobSystem* jobs, uint32_t count, uint32_t group, Fn&& fn) 
 
 BodyHandle PhysicsWorld::AddSphere(Vec4 pos, float radius, float mass) {
     RigidBody b{};
-    b.Position     = pos;
+    b.Position       = pos;
+    b.PrevPosition   = pos;
+    b.SleepAnchorPos = pos;
     b.Shape.Type   = ShapeType::Sphere;
     b.Shape.Radius = radius;
     if (mass > 0.0f) {
@@ -53,8 +55,12 @@ BodyHandle PhysicsWorld::AddSphere(Vec4 pos, float radius, float mass) {
 
 BodyHandle PhysicsWorld::AddBox(Vec4 pos, Quat orientation, Vec4 halfExtents, float mass) {
     RigidBody b{};
-    b.Position      = pos;
-    b.Orientation   = orientation;
+    b.Position          = pos;
+    b.PrevPosition      = pos;
+    b.SleepAnchorPos    = pos;
+    b.Orientation       = orientation;
+    b.PrevOrientation   = orientation;
+    b.SleepAnchorOrient = orientation;
     b.Shape.Type    = ShapeType::Box;
     b.Shape.Extents = halfExtents;
     if (mass > 0.0f) {
@@ -65,6 +71,36 @@ BodyHandle PhysicsWorld::AddBox(Vec4 pos, Quat orientation, Vec4 halfExtents, fl
         b.InvInertiaBodyDiag = Vec4(1.0f / (k * (he[1]*he[1] + he[2]*he[2])),
                                     1.0f / (k * (he[0]*he[0] + he[2]*he[2])),
                                     1.0f / (k * (he[0]*he[0] + he[1]*he[1])), 0.0f);
+    }
+    m_bodies.push_back(b);
+    return BodyHandle(m_bodies.size() - 1);
+}
+
+BodyHandle PhysicsWorld::AddCapsule(Vec4 pos, Quat orientation, float halfLen,
+                                    float radius, float mass) {
+    RigidBody b{};
+    b.Position          = pos;
+    b.PrevPosition      = pos;
+    b.SleepAnchorPos    = pos;
+    b.Orientation       = orientation;
+    b.PrevOrientation   = orientation;
+    b.SleepAnchorOrient = orientation;
+    b.Shape.Type    = ShapeType::Capsule;
+    b.Shape.Radius  = radius;
+    b.Shape.Extents = Vec4(halfLen, 0.0f, 0.0f, 0.0f);
+    if (mass > 0.0f) {
+        b.InvMass = 1.0f / mass;
+        // Solid capsule = cylinder (height H = 2*halfLen) + two hemispheres,
+        // mass split by volume; axis is local Y.
+        const float r = radius, H = 2.0f * halfLen;
+        const float vCyl = 3.14159265f * r * r * H;
+        const float vSph = (4.0f / 3.0f) * 3.14159265f * r * r * r;
+        const float mCyl = mass * vCyl / (vCyl + vSph);
+        const float mSph = mass - mCyl;
+        const float iY  = mCyl * r * r * 0.5f + mSph * 0.4f * r * r;
+        const float iXZ = mCyl * (H * H / 12.0f + r * r * 0.25f)
+                        + mSph * (0.4f * r * r + 0.25f * H * H + 0.375f * H * r);
+        b.InvInertiaBodyDiag = Vec4(1.0f / iXZ, 1.0f / iY, 1.0f / iXZ, 0.0f);
     }
     m_bodies.push_back(b);
     return BodyHandle(m_bodies.size() - 1);
@@ -155,8 +191,61 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
     auto t = clock_t_::now();
     ParallelFor(jobs, n, 64, [this, h](uint32_t i) {
         RigidBody& b = m_bodies[i];
+        // Snapshot the substep-start pose for render interpolation. Done for
+        // sleeping/static bodies too so Prev == current always holds for them.
+        b.PrevPosition    = b.Position;
+        b.PrevOrientation = b.Orientation;
+        // Sleeping bodies skip everything: velocities are zero, the pose is
+        // frozen, and InvInertiaWorld is still valid from the substep they
+        // slept in (orientation hasn't changed since).
+        if (b.Sleeping) return;
         if (!b.IsStatic()) {
             b.LinearVelocity += Gravity * h;
+
+            // --- implicit gyroscopic torque (Euler's equations, body space) ---
+            // Solve f(w) = I(w - w_n) + h * w x (I w) = 0 with ONE Newton step:
+            // dw = -J^-1 f(w_n), J = I + h*(skew(w) I - skew(I w)). Explicit
+            // integration of this term is unstable (it adds energy); the
+            // implicit step is unconditionally stable and slightly dissipative.
+            // Scalar 3x3 math on purpose — no matrix-convention hazards.
+            float invD[4]; b.InvInertiaBodyDiag.Store(invD);
+            if (EnableGyroscopic && invD[0] > 0.0f &&
+                !(invD[0] == invD[1] && invD[1] == invD[2]) &&      // isotropic: term is 0
+                LengthSq3(b.AngularVelocity) > 1e-10f) {
+                const Mat4 R = ToMatrix(b.Orientation);
+                float w[4]; Transform(b.AngularVelocity, Transpose(R)).Store(w); // world -> body
+                const float I0 = 1.0f / invD[0], I1 = 1.0f / invD[1], I2 = 1.0f / invD[2];
+                const float L0 = I0 * w[0], L1 = I1 * w[1], L2 = I2 * w[2];      // I w
+
+                const float f0 = h * (w[1] * L2 - w[2] * L1);                    // h * (w x Iw)
+                const float f1 = h * (w[2] * L0 - w[0] * L2);
+                const float f2 = h * (w[0] * L1 - w[1] * L0);
+
+                // J = diag(I) + h*(skew(w)*diag(I) - skew(Iw))
+                const float J00 = I0,                          J01 = h * (-w[2] * I1 + L2), J02 = h * (w[1] * I2 - L1);
+                const float J10 = h * (w[2] * I0 - L2),        J11 = I1,                    J12 = h * (-w[0] * I2 + L0);
+                const float J20 = h * (-w[1] * I0 + L1),       J21 = h * (w[0] * I1 - L0),  J22 = I2;
+
+                const float det = J00 * (J11 * J22 - J12 * J21)
+                                - J01 * (J10 * J22 - J12 * J20)
+                                + J02 * (J10 * J21 - J11 * J20);
+                if (std::fabs(det) > 1e-12f) {
+                    // Cramer's rule for J * dw = -f.
+                    const float inv = -1.0f / det;
+                    const float d0 = inv * (f0 * (J11 * J22 - J12 * J21)
+                                          - J01 * (f1 * J22 - J12 * f2)
+                                          + J02 * (f1 * J21 - J11 * f2));
+                    const float d1 = inv * (J00 * (f1 * J22 - J12 * f2)
+                                          - f0 * (J10 * J22 - J12 * J20)
+                                          + J02 * (J10 * f2 - f1 * J20));
+                    const float d2 = inv * (J00 * (J11 * f2 - f1 * J21)
+                                          - J01 * (J10 * f2 - f1 * J20)
+                                          + f0 * (J10 * J21 - J11 * J20));
+                    b.AngularVelocity = Transform(                                // body -> world
+                        Vec4(w[0] + d0, w[1] + d1, w[2] + d2, 0.0f), R);
+                }
+            }
+
             // Implicit exponential damping: v / (1 + h*d) is unconditionally
             // stable for any d, unlike the explicit v * (1 - h*d).
             b.LinearVelocity  = b.LinearVelocity  * (1.0f / (1.0f + h * LinearDamping));
@@ -204,6 +293,17 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
         for (uint32_t i : m_gridIndices)
             if (!m_bodies[i].IsStatic())
                 m_pairs.push_back((uint64_t(i) << 32) | p);
+
+    // Pairs where NEITHER body can move this substep (static or sleeping)
+    // produce contacts that cannot change — drop them before narrowphase.
+    // This is where sleeping actually saves work: a settled 200-box pile costs
+    // near-zero narrowphase and solver time.
+    if (EnableSleeping) {
+        m_pairs.erase(std::remove_if(m_pairs.begin(), m_pairs.end(), [this](uint64_t pk) {
+            return m_bodies[uint32_t(pk >> 32)].IsImmobile() &&
+                   m_bodies[uint32_t(pk & 0xFFFFFFFFu)].IsImmobile();
+        }), m_pairs.end());
+    }
     m_timings.BroadMs += MsSince(t);
 
     // --- 3. narrowphase (parallel; each pair writes only its own slot) ---
@@ -228,6 +328,12 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
     m_timings.Pairs    = uint32_t(m_pairs.size());
     m_timings.Contacts = 0;
     for (const Manifold& m : m_manifolds) m_timings.Contacts += m.Count;
+
+    // --- 3b. islands + waking (serial). Must run BEFORE the solver: a fresh
+    // contact from an awake body merges it into a sleeping island, and every
+    // body the solver touches this substep must already be awake.
+    if (EnableSleeping)
+        BuildIslandsAndWake();
 
     // --- 4. warm start: adopt last substep's impulses, presolve ---
     // Matching is by FeatureId first, then by nearest position. The fallback
@@ -269,9 +375,14 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
         }
         ContactSolver::Presolve(m_bodies, m, invH, SolverParams);
     }
-    for (auto& j : m_distanceJoints) Joints::Presolve(m_bodies, j);
-    for (auto& j : m_ballJoints)     Joints::Presolve(m_bodies, j);
-    for (auto& j : m_hingeJoints)    Joints::Presolve(m_bodies, j);
+    // Joints whose bodies are all frozen (sleeping island / static anchors)
+    // contribute nothing and are skipped through the whole solver.
+    auto jointFrozen = [this](uint32_t a, uint32_t b) {
+        return m_bodies[a].IsImmobile() && m_bodies[b].IsImmobile();
+    };
+    for (auto& j : m_distanceJoints) if (!jointFrozen(j.A, j.B)) Joints::Presolve(m_bodies, j);
+    for (auto& j : m_ballJoints)     if (!jointFrozen(j.A, j.B)) Joints::Presolve(m_bodies, j);
+    for (auto& j : m_hingeJoints)    if (!jointFrozen(j.A, j.B)) Joints::Presolve(m_bodies, j);
 
     // Warm starting is a SEPARATE pass after every presolve: presolve samples
     // the approach speed that decides restitution, and warm-start impulses
@@ -279,15 +390,15 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
     // until the iterations rebalance — interleaving the two passes reads that
     // garbage as real impacts and pumps energy into resting stacks.
     for (Manifold& m : m_manifolds)  ContactSolver::WarmStart(m_bodies, m);
-    for (auto& j : m_distanceJoints) Joints::WarmStart(m_bodies, j);
-    for (auto& j : m_ballJoints)     Joints::WarmStart(m_bodies, j);
-    for (auto& j : m_hingeJoints)    Joints::WarmStart(m_bodies, j);
+    for (auto& j : m_distanceJoints) if (!jointFrozen(j.A, j.B)) Joints::WarmStart(m_bodies, j);
+    for (auto& j : m_ballJoints)     if (!jointFrozen(j.A, j.B)) Joints::WarmStart(m_bodies, j);
+    for (auto& j : m_hingeJoints)    if (!jointFrozen(j.A, j.B)) Joints::WarmStart(m_bodies, j);
 
     // --- 5. sequential-impulse iterations: joints first, then contacts ---
     for (int it = 0; it < Iterations; ++it) {
-        for (auto& j : m_distanceJoints) Joints::Solve(m_bodies, j);
-        for (auto& j : m_ballJoints)     Joints::Solve(m_bodies, j);
-        for (auto& j : m_hingeJoints)    Joints::Solve(m_bodies, j);
+        for (auto& j : m_distanceJoints) if (!jointFrozen(j.A, j.B)) Joints::Solve(m_bodies, j);
+        for (auto& j : m_ballJoints)     if (!jointFrozen(j.A, j.B)) Joints::Solve(m_bodies, j);
+        for (auto& j : m_hingeJoints)    if (!jointFrozen(j.A, j.B)) Joints::Solve(m_bodies, j);
         for (Manifold& m : m_manifolds)  ContactSolver::SolveIteration(m_bodies, m);
     }
 
@@ -295,18 +406,30 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
     m_cache.clear();
     for (const Manifold& m : m_manifolds)
         m_cache.emplace(PairKey(m.A, m.B), m);
+
+    // --- 5b. split-impulse position pass: resolve penetration via pseudo
+    // velocities (consumed as displacement in step 6, never as real velocity).
+    if (SolverParams.SplitImpulse) {
+        for (int it = 0; it < SolverParams.PositionIterations; ++it)
+            for (Manifold& m : m_manifolds)
+                ContactSolver::SolvePositionIteration(m_bodies, m, invH, SolverParams);
+    }
     m_timings.SolveMs += MsSince(t);
 
     // --- 6. integrate positions (parallel) ---
     t = clock_t_::now();
     ParallelFor(jobs, n, 64, [this, h](uint32_t i) {
         RigidBody& b = m_bodies[i];
-        if (b.IsStatic()) return;
-        b.Position += b.LinearVelocity * h;
+        if (b.IsStatic() || b.Sleeping) return;
+        // Pseudo velocities integrate alongside the real ones — displacement
+        // only — and are consumed here (zeroed for the next substep).
+        b.Position += (b.LinearVelocity + b.PseudoLinearVelocity) * h;
         // q' = Normalize(q + (w_quat * q) * h/2) — first-order quat integration.
-        Vec4 w = b.AngularVelocity;
+        Vec4 w = b.AngularVelocity + b.PseudoAngularVelocity;
         Quat wq(w.x(), w.y(), w.z(), 0.0f);
         b.Orientation = Normalize(b.Orientation + Mul(wq, b.Orientation) * (0.5f * h));
+        b.PseudoLinearVelocity  = Vec4();
+        b.PseudoAngularVelocity = Vec4();
 #ifdef SGE_DEBUG
         float pf[4]; b.Position.Store(pf);
         assert(std::isfinite(pf[0]) && std::isfinite(pf[1]) && std::isfinite(pf[2])
@@ -322,12 +445,135 @@ void PhysicsWorld::Step(float h, SGE::JobSystem* jobs) {
     if (JointCount() > 0) {
         t = clock_t_::now();
         for (int it = 0; it < 3; ++it) {
-            for (auto& j : m_distanceJoints) Joints::SolvePosition(m_bodies, j);
-            for (auto& j : m_ballJoints)     Joints::SolvePosition(m_bodies, j);
-            for (auto& j : m_hingeJoints)    Joints::SolvePosition(m_bodies, j);
+            for (auto& j : m_distanceJoints) if (!jointFrozen(j.A, j.B)) Joints::SolvePosition(m_bodies, j);
+            for (auto& j : m_ballJoints)     if (!jointFrozen(j.A, j.B)) Joints::SolvePosition(m_bodies, j);
+            for (auto& j : m_hingeJoints)    if (!jointFrozen(j.A, j.B)) Joints::SolvePosition(m_bodies, j);
         }
         m_timings.SolveMs += MsSince(t);
     }
+
+    // --- 8. sleep bookkeeping: timers on post-solve velocities, whole-island
+    //     decision on the partition built in 3b (connectivity didn't change).
+    if (EnableSleeping)
+        UpdateSleepState(h);
+}
+
+// ============================= sleeping/islands ============================
+
+uint32_t PhysicsWorld::FindRoot(uint32_t i) {
+    while (m_islandRoot[i] != i) {
+        m_islandRoot[i] = m_islandRoot[m_islandRoot[i]];   // path halving
+        i = m_islandRoot[i];
+    }
+    return i;
+}
+
+void PhysicsWorld::BuildIslandsAndWake() {
+    const uint32_t n = uint32_t(m_bodies.size());
+    m_islandRoot.resize(n);
+    for (uint32_t i = 0; i < n; ++i) m_islandRoot[i] = i;
+
+    // Union with the SMALLER index as root: the final partition (and thus the
+    // sleep/wake decisions) is independent of edge processing order — part of
+    // the engine's determinism guarantee.
+    auto unite = [this](uint32_t a, uint32_t b) {
+        if (m_bodies[a].IsStatic() || m_bodies[b].IsStatic()) return;   // statics never link
+        uint32_t ra = FindRoot(a), rb = FindRoot(b);
+        if (ra == rb) return;
+        if (ra < rb) m_islandRoot[rb] = ra; else m_islandRoot[ra] = rb;
+    };
+    for (const Manifold& m : m_manifolds)  unite(m.A, m.B);
+    for (const auto& j : m_distanceJoints) unite(j.A, j.B);
+    for (const auto& j : m_ballJoints)     unite(j.A, j.B);
+    for (const auto& j : m_hingeJoints)    unite(j.A, j.B);
+
+    // Any awake member wakes its whole island (this is how a thrown box wakes
+    // the sleeping stack it lands on: the new manifold merged their islands).
+    m_islandAwake.assign(n, 0);
+    for (uint32_t i = 0; i < n; ++i)
+        if (!m_bodies[i].IsStatic() && !m_bodies[i].Sleeping)
+            m_islandAwake[FindRoot(i)] = 1;
+    for (uint32_t i = 0; i < n; ++i) {
+        RigidBody& b = m_bodies[i];
+        if (!b.IsStatic() && b.Sleeping && m_islandAwake[FindRoot(i)]) {
+            b.Sleeping          = false;
+            b.SleepTimer        = 0.0f;
+            b.SleepAnchorPos    = b.Position;
+            b.SleepAnchorOrient = b.Orientation;
+        }
+    }
+}
+
+void PhysicsWorld::UpdateSleepState(float h) {
+    const uint32_t n = uint32_t(m_bodies.size());
+    // Displacement tolerances over the whole sleep window (see header): a body
+    // is quiet while it stays within these of its anchor pose.
+    const float posTolSq = (SleepLinearVel * TimeToSleep) * (SleepLinearVel * TimeToSleep);
+    // Quat dot vs anchor: |dot| = cos(halfAngle); quiet while angle < tol.
+    const float minQuatDot = std::cos(0.5f * SleepAngularVel * TimeToSleep);
+
+    // Per-body quiet timers (awake dynamics only).
+    for (uint32_t i = 0; i < n; ++i) {
+        RigidBody& b = m_bodies[i];
+        if (b.IsStatic() || b.Sleeping) continue;
+        const bool quiet =
+            LengthSq3(b.Position - b.SleepAnchorPos) < posTolSq &&
+            std::fabs(Dot(b.Orientation, b.SleepAnchorOrient)) > minQuatDot;
+        if (quiet) {
+            b.SleepTimer += h;
+        } else {
+            b.SleepTimer        = 0.0f;
+            b.SleepAnchorPos    = b.Position;      // restart the window here
+            b.SleepAnchorOrient = b.Orientation;
+        }
+    }
+
+    // Whole-island minimum: one restless body keeps its island awake.
+    m_islandQuiet.assign(n, 1e9f);
+    for (uint32_t i = 0; i < n; ++i)
+        if (!m_bodies[i].IsStatic() && !m_bodies[i].Sleeping) {
+            const uint32_t r = FindRoot(i);
+            m_islandQuiet[r] = std::min(m_islandQuiet[r], m_bodies[i].SleepTimer);
+        }
+
+    m_timings.Sleeping = 0;
+    m_timings.Islands  = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        RigidBody& b = m_bodies[i];
+        if (b.IsStatic()) continue;
+        if (FindRoot(i) == i) ++m_timings.Islands;
+        if (!b.Sleeping && m_islandQuiet[FindRoot(i)] >= TimeToSleep) {
+            b.Sleeping        = true;
+            b.LinearVelocity  = Vec4();
+            b.AngularVelocity = Vec4();
+        }
+        if (b.Sleeping) ++m_timings.Sleeping;
+    }
+}
+
+float PhysicsWorld::InterpolationAlpha() const {
+    return std::clamp(m_accumulator * FixedHz, 0.0f, 1.0f);
+}
+
+void PhysicsWorld::GetRenderPose(BodyHandle h, Vec4& outPos, Quat& outRot) const {
+    const RigidBody& b = m_bodies[h];
+    const float a = InterpolationAlpha();
+    outPos = Lerp(b.PrevPosition, b.Position, a);
+    outRot = Nlerp(b.PrevOrientation, b.Orientation, a);   // sub-substep angles: nlerp is exact enough
+}
+
+void PhysicsWorld::Wake(BodyHandle h) {
+    RigidBody& b = m_bodies[h];
+    if (b.IsStatic()) return;
+    b.Sleeping          = false;
+    b.SleepTimer        = 0.0f;
+    b.SleepAnchorPos    = b.Position;
+    b.SleepAnchorOrient = b.Orientation;
+}
+
+void PhysicsWorld::WakeAll() {
+    for (uint32_t i = 0; i < uint32_t(m_bodies.size()); ++i)
+        Wake(i);
 }
 
 } // namespace SGE::Physics

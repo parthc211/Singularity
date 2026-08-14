@@ -69,7 +69,12 @@ void Presolve(std::vector<RigidBody>& bodies, Manifold& m, float invH, const Par
         const float vn0  = Dot3(VelocityAt(b, cp.rB) - VelocityAt(a, cp.rA), n);
         const float rest = vn0 < -p.RestitutionThreshold ? -e * vn0 : 0.0f;
         if (cp.Penetration >= 0.0f) {
-            const float baum = p.Beta * invH * std::max(cp.Penetration - p.Slop, 0.0f);
+            // Split impulse: penetration is handled by the position pass, so
+            // the velocity row carries only restitution — Baumgarte's bias
+            // velocity (and the energy it injects) disappears entirely.
+            const float baum = p.SplitImpulse
+                             ? 0.0f
+                             : p.Beta * invH * std::max(cp.Penetration - p.Slop, 0.0f);
             cp.Bias = std::max(baum, rest);
         } else {
             cp.Bias = std::max(cp.Penetration * invH, rest);
@@ -121,6 +126,34 @@ void SolveIteration(std::vector<RigidBody>& bodies, Manifold& m) {
             cp.TangentImpulse[t] = std::clamp(old + dL, -maxT, maxT);
             ApplyImpulse(a, b, cp.rA, cp.rB, m.Tangent[t] * (cp.TangentImpulse[t] - old));
         }
+    }
+}
+
+void SolvePositionIteration(std::vector<RigidBody>& bodies, Manifold& m,
+                            float invH, const Params& p) {
+    RigidBody& a = bodies[m.A];
+    RigidBody& b = bodies[m.B];
+
+    for (uint32_t i = 0; i < m.Count; ++i) {
+        ContactPoint& cp = m.Points[i];
+        // Same target Baumgarte would have used — but chased with PSEUDO
+        // velocities that become pure displacement, never kinetic energy.
+        const float target = p.Beta * invH * std::max(cp.Penetration - p.Slop, 0.0f);
+        if (target <= 0.0f && cp.PseudoImpulse == 0.0f) continue;
+
+        const Vec4 pvA = a.PseudoLinearVelocity + Cross(a.PseudoAngularVelocity, cp.rA);
+        const Vec4 pvB = b.PseudoLinearVelocity + Cross(b.PseudoAngularVelocity, cp.rB);
+        const float vn = Dot3(pvB - pvA, m.Normal);
+
+        const float dL  = cp.MassNormal * (target - vn);
+        const float old = cp.PseudoImpulse;
+        cp.PseudoImpulse = std::max(old + dL, 0.0f);
+        const Vec4 P = m.Normal * (cp.PseudoImpulse - old);
+
+        a.PseudoLinearVelocity  -= P * a.InvMass;
+        a.PseudoAngularVelocity -= Transform(Cross(cp.rA, P), a.InvInertiaWorld);
+        b.PseudoLinearVelocity  += P * b.InvMass;
+        b.PseudoAngularVelocity += Transform(Cross(cp.rB, P), b.InvInertiaWorld);
     }
 }
 

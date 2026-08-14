@@ -9,13 +9,17 @@
 // (FixedHz substeps, at most 4 per frame — excess time is dropped rather than
 // spiraling). Each substep:
 //
-//   integrate forces + refresh I_w^-1   (parallel)
+//   integrate forces + refresh I_w^-1   (parallel, sleeping bodies skipped)
 //   broadphase AABBs                    (parallel)  -> grid pairs   (serial)
+//     (pairs where neither body can move are dropped — sleeping's payoff)
 //   narrowphase per pair                (parallel, per-index slots)
+//   islands via union-find + waking     (serial, deterministic min-root)
 //   warm start via manifold cache       (serial)
 //   solve joints + contacts, N iters    (serial)
-//   integrate positions                 (parallel)
+//   split-impulse position pass         (serial, pseudo velocities)
+//   integrate positions (+pseudo)       (parallel)
 //   joint position projection (NGS)     (serial)
+//   sleep bookkeeping                   (serial, displacement anchors)
 //
 // Threading model: parallel stages write ONLY their own index's slot, the
 // solver stays serial, and the pair list is sorted — so the trajectory is
@@ -46,11 +50,17 @@ public:
         uint32_t Substeps    = 0;
         uint32_t Pairs       = 0;      // candidate pairs (last substep)
         uint32_t Contacts    = 0;      // contact points   (last substep)
+        uint32_t Sleeping    = 0;      // sleeping dynamic bodies (last substep)
+        uint32_t Islands     = 0;      // contact/joint islands among dynamics
     };
 
     // --- construction (mass <= 0 makes the body static) ---
     BodyHandle AddSphere(Math::Vec4 pos, float radius, float mass);
     BodyHandle AddBox(Math::Vec4 pos, Math::Quat orientation, Math::Vec4 halfExtents, float mass);
+    // Capsule axis is local +Y; halfLen is the SEGMENT half-length (total
+    // height = 2 * (halfLen + radius)).
+    BodyHandle AddCapsule(Math::Vec4 pos, Math::Quat orientation, float halfLen,
+                          float radius, float mass);
     BodyHandle AddStaticPlane(Math::Vec4 normal, float d);
 
     // Anchors/axes are given in WORLD space at the current pose.
@@ -59,6 +69,20 @@ public:
     void AddHingeJoint(BodyHandle a, BodyHandle b, Math::Vec4 worldAnchor, Math::Vec4 worldAxis);
 
     void Clear();
+
+    // --- render interpolation ---
+    // The fixed-step accumulator's leftover fraction places "render time"
+    // between the last two substeps; GetRenderPose blends each body's pose
+    // accordingly (nlerp for orientation). Purely cosmetic — the simulation
+    // state is untouched, so determinism is unaffected.
+    float InterpolationAlpha() const;                        // [0, 1)
+    void  GetRenderPose(BodyHandle h, Math::Vec4& outPos, Math::Quat& outRot) const;
+
+    // --- sleeping ---
+    // Wake a body (and, transitively next substep, its island). Applying
+    // forces/velocities to a sleeping body from outside? Wake it first.
+    void Wake(BodyHandle h);
+    void WakeAll();
 
     // --- stepping ---
     void Update(float frameDt, SGE::JobSystem* jobs = nullptr);
@@ -81,17 +105,40 @@ public:
     bool       UseGrid    = true;    // false = brute-force O(n^2) broadphase (A/B + validation)
     ContactSolver::Params SolverParams;
 
-    // First-order integration with no gyroscopic term lets long-running
-    // undamped rigs (a frictionless whirling hinge) slowly gain rotational
-    // energy. Industry-standard guards, both tunable: a touch of angular
-    // damping (Unity ships 0.05 as its default) and a hard angular speed cap
-    // so no body rotates unphysically far within one substep.
+    // Sleeping: an ISLAND (bodies connected by contacts/joints) sleeps when
+    // every member has stayed quiet for TimeToSleep. Whole-island semantics
+    // matter: a slow body at the bottom of an active stack must not freeze
+    // while boxes grind above it.
+    //
+    // Quietness is AVERAGE motion over the sleep window, measured as net
+    // displacement from an anchor pose (position tolerance = SleepLinearVel *
+    // TimeToSleep; orientation tolerance = SleepAngularVel * TimeToSleep).
+    // Instantaneous velocity would never trigger: settled stacks keep a
+    // standing zero-mean jitter from the sequential-impulse solver.
+    bool  EnableSleeping  = true;
+    float SleepLinearVel  = 0.06f;   // m/s average drift allowed while "quiet"
+    float SleepAngularVel = 0.10f;   // rad/s average
+    float TimeToSleep     = 0.5f;    // s inside tolerance before sleeping
+
+    // Gyroscopic term (Euler's equations: I w' = -w x (I w) + tau), solved
+    // IMPLICITLY — one Newton step in body space — because the explicit form
+    // injects energy and explodes at high spin rates. Gives anisotropic
+    // bodies real precession and the Dzhanibekov (tennis-racket) flip;
+    // isotropic bodies (spheres) are unaffected (w x Iw == 0).
+    bool EnableGyroscopic = true;
+
+    // Remaining first-order integration guards, both tunable: a touch of
+    // angular damping (Unity ships 0.05 as its default) and a hard angular
+    // speed cap so no body rotates unphysically far within one substep.
     float LinearDamping   = 0.0f;    // 1/s
     float AngularDamping  = 0.05f;   // 1/s
     float MaxAngularSpeed = 30.0f;   // rad/s (~0.25 rad per 120 Hz substep)
 
 private:
     void Step(float h, SGE::JobSystem* jobs);
+    void BuildIslandsAndWake();      // union-find over contacts+joints; wake merged islands
+    void UpdateSleepState(float h);  // per-body timers -> whole-island sleep decision
+    uint32_t FindRoot(uint32_t i);   // union-find lookup with path halving
 
     std::vector<RigidBody>     m_bodies;
     std::vector<DistanceJoint> m_distanceJoints;
@@ -110,6 +157,9 @@ private:
     std::vector<uint64_t> m_pairs;         // packed (lo << 32 | hi)
     std::vector<Manifold> m_pairManifolds; // one slot per pair (parallel narrowphase)
     std::vector<Manifold> m_manifolds;     // compacted, in pair order
+    std::vector<uint32_t> m_islandRoot;    // union-find parents (min-root: deterministic)
+    std::vector<uint8_t>  m_islandAwake;   // per-root: island contains an awake body
+    std::vector<float>    m_islandQuiet;   // per-root: min quiet time in the island
 };
 
 } // namespace SGE::Physics
