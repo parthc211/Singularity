@@ -96,6 +96,50 @@ Singularity/
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
 - [ ] Demo reel — a short video walking all 16 scenes
 
+**Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
+- [ ] Render graph (frame graph) — passes declare resource reads/writes; the graph derives all barriers, culls unused passes, and aliases transient memory. Existing `GBuffer`/`ShadowMap`/`RenderTexture` become graph-allocated handles instead of per-scene objects
+- [ ] Unified scene + visibility system — one world composing all techniques, backed by a BVH/octree with frustum + Hi-Z occlusion culling (renderer decides what's worth drawing instead of drawing everything)
+- [ ] Reflection + serialization — compile-time C++ field reflection (à la `UPROPERTY`); the substrate for scene save/load, an auto-generated inspector, and scripting bindings
+
+**Rendering — completing the modern rasterizer:**
+- [ ] IBL (image-based lighting) — irradiance (SH) + prefiltered env cubemap + BRDF LUT (split-sum); the missing ambient half of the existing GGX BRDF (metals currently use an F0 placeholder)
+- [ ] Clustered / tiled forward+ shading — froxel light culling for thousands of lights and lit transparency (removes the deferred 64-light cap)
+- [ ] TAA + motion vectors — jittered temporal accumulation with history reprojection; motion vectors also drive motion blur, SSR, and temporal upsampling
+- [ ] Composable post-processing stack — auto-exposure/eye adaptation, DoF, motion blur, 3D-LUT color grading, vignette/chromatic-aberration/film-grain; existing bloom becomes one node
+- [ ] SSR + reflection probes — screen-space depth ray-march with baked cubemap probe fallback for off-screen/edge misses
+- [ ] Transparency / OIT — weighted-blended OIT or a sorted forward transparent pass (everything is opaque today)
+
+**Rendering — frontiers:**
+- [ ] DXR (hardware ray tracing) — BLAS/TLAS + shader binding table + ray-gen/hit/miss; ship RT shadows → reflections/AO → reference path tracer
+- [ ] GPU-driven rendering — `ExecuteIndirect` with GPU frustum/occlusion culling and draw-arg compaction (depends on bindless)
+- [ ] Mesh shaders — meshlet clusters + amplification/mesh shader front-end with per-meshlet culling and LOD (Nanite-adjacent)
+- [ ] Dynamic GI — DDGI irradiance probes (or voxel cone tracing / screen-space GI) for indirect bounce
+- [ ] Volumetric fog / lighting — froxel in-scatter with shadow-map visibility, ray-marched into a screen texture (light shafts, god rays)
+- [ ] Deferred decals — project albedo/normal/roughness into the G-buffer via box volumes (bullet holes, grunge, road markings)
+- [ ] GPU particle system / VFX — compute-simulated particles (spawn/update/sort) rendered as instanced billboards; foundation of a VFX system
+- [ ] Atmosphere & ocean — physically-based sky (Hillaire aerial perspective) and FFT ocean (Tessendorf) as set-pieces
+
+**Low-level systems:**
+- [ ] Bindless / descriptor indexing — SM 6.6 `ResourceDescriptorHeap`; materials index resources by integer (prerequisite for GPU-driven rendering and DXR)
+- [ ] Multi-queue — async compute queue (SSAO/particles/light-culling overlapping graphics) + copy queue for streaming uploads, fence-synced
+- [ ] RHI abstraction — pull DX12 behind an `IRenderDevice`/`ICommandList` seam (design for a future Vulkan backend even if stubbed)
+- [ ] Full GPU allocator + residency — extend `GpuHeap` to multi-heap, budget-aware, `MakeResident`/`Evict` residency management + defrag (à la D3D12MA)
+- [ ] CPU task graph — dependency DAG over the existing work-stealing `JobSystem` (animation → physics → culling → recording); fiber-based scheduling as the stretch
+- [ ] Profiler & instrumentation — CPU scope timers + GPU timestamp queries per pass + PIX markers, surfaced as a frame overlay (pairs with the render graph)
+- [ ] CVar / config / VFS — runtime console variables, config loading, and a virtual file system with pak packaging + async I/O
+- [ ] Offline asset cooking — bake glTF/FBX to a near-`memcpy` binary format at build time; asset GUIDs + dependency database + hot-reload (replaces runtime parsing)
+- [ ] Memory tracking — tagged allocations, per-subsystem budgets, leak detection over the existing custom allocators
+
+**Core engine capabilities:**
+- [ ] Editor — dockable UI: scene hierarchy, reflection-driven inspector, ImGuizmo transform gizmos, asset browser, drag-drop placement (depends on reflection + serialization)
+- [ ] Transform hierarchy / scene graph — parent-child transforms with dirty-flag world-matrix propagation (parent-before-child, like the skeleton pass)
+- [ ] Scene serialization + prefabs — save/load worlds to disk and instance reusable entity templates with per-instance overrides
+- [ ] Animation graph — state machines + blend trees over the existing clip/blend runtime, plus IK (two-bone / FABRIK) and skeleton retargeting
+- [ ] Audio — XAudio2/WASAPI mixer with a submix/bus graph and 3D spatialization (currently absent entirely)
+- [ ] Input action mapping — named action/axis bindings over the existing raw keyboard/mouse/XInput, remappable from config
+- [ ] Scripting / gameplay layer — hot-reloadable native gameplay modules or embedded Lua/C# driving reflected components
+- [ ] Navigation — Recast-style navmesh bake + A* pathfinding with local avoidance
+
 **Rendering & assets:**
 - [x] glTF-embedded texture extraction — decode GLB PNG buffers through the WIC loader so characters render textured
 - [x] `ufbx` front-end feeding the same `SkeletalMeshData` — any `.fbx` dropped into `Assets/` (e.g. a Mixamo download) appears in the Skeletal Animation character list
