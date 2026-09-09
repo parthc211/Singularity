@@ -8,13 +8,14 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **16 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **17 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
 | **Cube Grid / Single Cube** | Forward rendering, ECS-driven draws, per-object constant arena |
 | **GPU Heap Allocator** | Custom `ID3D12Heap` + first-fit free-list handing out *placed* resources, with a live heap map |
-| **Deferred Rendering** | 3-target MRT G-buffer + fullscreen lighting pass, up to 64 moving point lights |
+| **Deferred Rendering** | 3-target MRT G-buffer + fullscreen lighting pass, up to 64 moving point lights (barriers scheduled by the render graph) |
+| **Render Graph** | Declarative multi-pass frame: passes declare per-resource states, the graph derives/batches all barriers and reference-count culls unused passes — with a live panel of the compiled schedule, per-pass barriers, and culling |
 | **SIMD Math** | Hand-written SSE/AVX `Vec4`/`Mat4`/`Quat`, validated 1:1 against DirectXMath, with benchmarks |
 | **CPU Allocators** | Arena / Stack / Pool / Free-list allocators with live memory maps and vs-`malloc` timings |
 | **Tessellation** | Hull/domain-shader terrain, distance-based crack-free LOD, procedural fBm displacement |
@@ -31,10 +32,12 @@ The Sandbox app is a single executable hosting **16 interactive demos**, selecta
 ## Engine systems
 
 - **Renderer (DX12):** device/swap-chain/command-context bootstrap, root signatures, PSO management (MRT + tessellation capable), depth buffers, reusable render-target helpers (`GBuffer`, `ShadowMap`, `CascadedShadowMap`, `RenderTexture`), and sampled textures (`Texture2D`: WIC decoding, sRGB-aware CPU mip generation, staged DEFAULT-heap upload).
+- **Render graph:** a per-frame declarative pass scheduler (`RenderGraph`) — passes declare the state they need each resource in, and the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread, so barriers stop being hand-written per scene. Scheduling + culling are implemented (transient-resource memory aliasing is the planned Phase 2).
 - **Shaders:** compiled at runtime with **DXC** (SM 6.0); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
+- **Profiling:** `GpuProfiler` times regions with DX12 timestamp queries (per-frame-slot readback resolved ~`FrameCount` frames later, after the fence wait, so no stall); the render graph auto-wraps every pass, so per-pass GPU cost is free. `CpuProfiler` adds nested RAII CPU scope timers. Both feed a live ImGui overlay (a `Scene ▸ pass` tree with millisecond timings).
 - **Physics:** a from-scratch 3D rigid-body engine (`Physics::PhysicsWorld`) built entirely on the engine's own SIMD math: sphere/capsule/box/plane colliders, SAT box-box narrowphase with Sutherland–Hodgman clipping, a warm-started sequential-impulse solver (accumulated & clamped impulses, friction cones, restitution, split-impulse position correction with a Baumgarte A/B, speculative contacts), persistent manifolds, a spatial-hash broadphase, island-based sleeping (displacement-anchor quietness, whole-island wake), and ball/hinge/distance joints with energy-neutral NGS position correction — stepped at fixed 120 Hz substeps, single-threaded or JobSystem-parallel with bit-identical trajectories.
 - **Animation:** a skeletal-animation stack built on the engine's SIMD math — `Skeleton` (flat parent-before-child joint arrays, inverse binds), sparse keyframe `AnimationClip`s, cursor-cached sampling (slerp), pose blending (nlerp), single-pass pose propagation and bone-palette generation, GPU-skinned in the vertex shader (4 weights, 256-joint palette CBV).
 - **Assets:** a hand-written **glTF 2.0 loader** (own JSON parser, GLB container, accessors, skins, animations, embedded textures, base64/external buffers) with right-handed→left-handed conversion at import, feeding a format-agnostic `SkeletalMeshData`; an **FBX front-end** over the vendored single-file [ufbx](https://github.com/ufbx/ufbx) library (MIT/Unlicense — plumbing, like ImGui) targeting the same intermediate, with 30 Hz clip baking from ufbx's world matrices; plus the OBJ loader with tangent generation and WIC image loading.
@@ -78,7 +81,7 @@ Singularity/
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 16 demo scenes
+    ├── Scenes/         # the 17 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
@@ -94,10 +97,10 @@ Singularity/
 **Portfolio polish (next up):**
 - [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
-- [ ] Demo reel — a short video walking all 16 scenes
+- [ ] Demo reel — a short video walking all 17 scenes
 
 **Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
-- [ ] Render graph (frame graph) — passes declare resource reads/writes; the graph derives all barriers, culls unused passes, and aliases transient memory. Existing `GBuffer`/`ShadowMap`/`RenderTexture` become graph-allocated handles instead of per-scene objects
+- [~] Render graph (frame graph) — **scheduling + culling done**: passes declare per-resource read/write states (`RenderGraph::Import`/`AddPass`/`Execute`), the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread. The `Render Graph` demo prints the live compiled schedule/barriers/culling; `DeferredScene` is migrated off manual `GBuffer::TransitionToX` calls. **Phase 2 (TODO):** graph-owned *transient* resources + lifetime-based memory aliasing (the `Import` API is the seam it slots into)
 - [ ] Unified scene + visibility system — one world composing all techniques, backed by a BVH/octree with frustum + Hi-Z occlusion culling (renderer decides what's worth drawing instead of drawing everything)
 - [ ] Reflection + serialization — compile-time C++ field reflection (à la `UPROPERTY`); the substrate for scene save/load, an auto-generated inspector, and scripting bindings
 
@@ -125,7 +128,7 @@ Singularity/
 - [ ] RHI abstraction — pull DX12 behind an `IRenderDevice`/`ICommandList` seam (design for a future Vulkan backend even if stubbed)
 - [ ] Full GPU allocator + residency — extend `GpuHeap` to multi-heap, budget-aware, `MakeResident`/`Evict` residency management + defrag (à la D3D12MA)
 - [ ] CPU task graph — dependency DAG over the existing work-stealing `JobSystem` (animation → physics → culling → recording); fiber-based scheduling as the stretch
-- [ ] Profiler & instrumentation — CPU scope timers + GPU timestamp queries per pass + PIX markers, surfaced as a frame overlay (pairs with the render graph)
+- [~] Profiler & instrumentation — **done:** GPU timestamp-query timing per render-graph pass (`GpuProfiler`, multi-frame-safe async read-back) + nested CPU scope timers (`CpuProfiler`) + a live ImGui overlay (Scene ▸ per-pass tree, ms each) and a per-pass GPU-ms column in the Render Graph demo. **TODO:** PIX marker regions (`PIXBeginEvent`) for capture-tool correlation
 - [ ] CVar / config / VFS — runtime console variables, config loading, and a virtual file system with pak packaging + async I/O
 - [ ] Offline asset cooking — bake glTF/FBX to a near-`memcpy` binary format at build time; asset GUIDs + dependency database + hot-reload (replaces runtime parsing)
 - [ ] Memory tracking — tagged allocations, per-subsystem budgets, leak detection over the existing custom allocators

@@ -10,9 +10,11 @@
 #include "Scene/RenderSystem.h"
 #include "Scene/SceneManager.h"
 #include "Scene/DemoScene.h"
+#include "Profiling/CpuProfiler.h"
 #include "Scenes/CubeGridScene.h"
 #include "Scenes/SingleCubeScene.h"
 #include "Scenes/GpuHeapScene.h"
+#include "Scenes/RenderGraphScene.h"
 #include "Scenes/DeferredScene.h"
 #include "Scenes/SimdMathScene.h"
 #include "Scenes/AllocatorScene.h"
@@ -192,6 +194,7 @@ protected:
         m_scenes.Add(std::make_unique<SingleCubeScene>(&m_mesh));
         m_scenes.Add(std::make_unique<GpuHeapScene>());
         m_scenes.Add(std::make_unique<DeferredScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<RenderGraphScene>(&m_mesh));
         m_scenes.Add(std::make_unique<SimdMathScene>());
         m_scenes.Add(std::make_unique<AllocatorScene>());
         m_scenes.Add(std::make_unique<TessellationScene>());
@@ -225,6 +228,7 @@ protected:
     void OnRender() override
     {
         using namespace DirectX;
+        m_cpuProfiler.BeginFrame(); // publish last frame's CPU scopes, start a new one
         m_shaderLib.FlushReloads();
 
         auto&  input = GetInput();
@@ -324,9 +328,21 @@ protected:
         m_objectCB.BeginFrame(frame);
 
         // Update then draw the active demo scene through the shared render path.
+        // A CPU scope brackets each half; a single GPU "Scene" region brackets
+        // the draw recording, under which the render graph nests its per-pass
+        // timings (so the profiler overlay shows Scene > Geometry, Lighting...).
         SGE::DemoContext ctx = BuildContext(dt);
-        m_scenes.Update(ctx);
-        m_scenes.Render(ctx);
+        {
+            SGE::ScopedCpuTimer t(m_cpuProfiler, "Scene::Update");
+            m_scenes.Update(ctx);
+        }
+        {
+            SGE::ScopedCpuTimer t(m_cpuProfiler, "Scene::Render");
+            auto&    prof   = GetRenderer().GetProfiler();
+            uint32_t region = prof.BeginRegion(cmd, "Scene");
+            m_scenes.Render(ctx);
+            prof.EndRegion(cmd, region);
+        }
     }
 
     void OnImGui() override
@@ -349,8 +365,44 @@ protected:
         // Scene-switcher window + the active scene's own controls/explainer.
         m_scenes.OnImGui(BuildContext(GetDeltaTime()));
 
+        DrawProfilerWindow();
+
         if (m_showDemo)
             ImGui::ShowDemoWindow(&m_showDemo);
+    }
+
+    // CPU scope timings (1 frame stale) + GPU region timings (FrameCount frames
+    // stale — timestamp read-back is async). Regions are indented by nesting
+    // depth, so the render graph's per-pass rows sit under the "Scene" region.
+    void DrawProfilerWindow()
+    {
+        ImGui::SetNextWindowPos({ 10, 360 }, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({ 320, 0 }, ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Profiler"))
+        {
+            auto& gpu = GetRenderer().GetProfiler();
+            ImGui::Text("Frame: %.2f ms CPU  |  %.3f ms GPU",
+                        1000.0f / ImGui::GetIO().Framerate, gpu.FrameGpuMs());
+            ImGui::Separator();
+
+            ImGui::TextDisabled("GPU regions (timestamp queries)");
+            if (gpu.Results().empty())
+                ImGui::TextDisabled("  (warming up...)");
+            for (const auto& r : gpu.Results()) {
+                if (r.depth > 0) ImGui::Indent(r.depth * 12.0f);
+                ImGui::Text("%-16s %6.3f ms", r.name.c_str(), r.ms);
+                if (r.depth > 0) ImGui::Unindent(r.depth * 12.0f);
+            }
+
+            ImGui::Separator();
+            ImGui::TextDisabled("CPU scopes");
+            for (const auto& s : m_cpuProfiler.Results()) {
+                if (s.depth > 0) ImGui::Indent(s.depth * 12.0f);
+                ImGui::Text("%-16s %6.3f ms", s.name.c_str(), s.ms);
+                if (s.depth > 0) ImGui::Unindent(s.depth * 12.0f);
+            }
+        }
+        ImGui::End();
     }
 
     void OnResize(uint32_t w, uint32_t h) override
@@ -412,6 +464,7 @@ private:
     SGE::Camera              m_camera;
     SGE::RenderSystem        m_renderSystem;  // draws Transform+Mesh entities
     SGE::SceneManager        m_scenes;        // owns + switches the demo scenes
+    SGE::CpuProfiler         m_cpuProfiler;   // per-frame CPU scope timings
 
     DirectX::XMFLOAT3 m_camPos    = { 0.0f, 2.0f, -8.0f };
     float             m_camYaw    = 0.0f;

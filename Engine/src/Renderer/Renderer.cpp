@@ -38,6 +38,10 @@ bool Renderer::Initialize(HWND hwnd, uint32_t width, uint32_t height)
                                  D3D12_HEAP_TYPE_UPLOAD))
             return false;
 
+        if (!m_profiler.Initialize(m_graphicsDevice.GetDevice(),
+                                   m_graphicsDevice.GetCommandQueue()))
+            return false;
+
         m_frameIndex = m_swapChain.GetCurrentBackBufferIndex();
         m_width      = width;
         m_height     = height;
@@ -65,6 +69,10 @@ void Renderer::BeginFrame()
 
     m_commandContext.Reset(m_frameIndex);
 
+    // Read back this slot's GPU timestamps (from FrameCount frames ago — the
+    // fence wait above guarantees they're complete) and reset for this frame.
+    m_profiler.BeginFrame(m_frameIndex);
+
     // Back buffer starts in PRESENT state; transition to RENDER_TARGET before clearing/drawing.
     m_commandContext.ResourceBarrier(
         m_swapChain.GetCurrentBackBuffer(),
@@ -90,6 +98,10 @@ void Renderer::BeginFrame()
 
 void Renderer::EndFrame()
 {
+    // Copy this frame's timestamps into the readback buffer before the list
+    // closes (no-op if nothing was profiled this frame).
+    m_profiler.Resolve(m_commandContext.GetCommandList());
+
     // Must transition back to PRESENT before calling Present().
     m_commandContext.ResourceBarrier(
         m_swapChain.GetCurrentBackBuffer(),
@@ -193,6 +205,7 @@ void Renderer::Shutdown()
         m_fenceEvent = nullptr;
     }
 
+    m_profiler.Shutdown();
     m_fence.Reset();
     m_commandContext.Shutdown();
     m_depthBuffer.Reset();

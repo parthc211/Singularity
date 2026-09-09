@@ -23,6 +23,9 @@ add_library(SingularityEngine STATIC
     src/Memory/AllocatorBenchmark.cpp
     src/Jobs/JobSystem.h
     src/Jobs/JobSystem.cpp
+    src/Profiling/GpuProfiler.h
+    src/Profiling/GpuProfiler.cpp
+    src/Profiling/CpuProfiler.h
     src/Animation/Skeleton.h
     src/Animation/AnimationClip.h
     src/Animation/Animation.h
@@ -117,6 +120,8 @@ add_library(SingularityEngine STATIC
     src/Renderer/ImageLoader.cpp
     src/Renderer/Renderer.h
     src/Renderer/Renderer.cpp
+    src/Renderer/RenderGraph/RenderGraph.h
+    src/Renderer/RenderGraph/RenderGraph.cpp
     src/UI/ImGuiLayer.h
     src/UI/ImGuiLayer.cpp
 )

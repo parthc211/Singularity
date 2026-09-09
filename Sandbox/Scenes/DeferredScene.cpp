@@ -30,6 +30,7 @@ void DeferredScene::OnLoad(const DemoContext& ctx) {
     BuildScene();
     BuildLights();
     m_gbuffer.Create(ctx.device, ctx.renderer->GetWidth(), ctx.renderer->GetHeight());
+    m_graph.ResetStateCache(); // fresh G-buffer resources -> forget any prior states
     m_ready = true;
 }
 
@@ -155,42 +156,72 @@ void DeferredScene::OnRender(const DemoContext& ctx) {
     ID3D12GraphicsCommandList* cmd = ctx.cmd;
     Renderer* r = ctx.renderer;
 
-    // Recreate the G-buffer if the window changed size (GPU drained first).
+    // Recreate the G-buffer if the window changed size (GPU drained first). The
+    // graph's state cache is keyed by resource pointer, so drop it when the
+    // G-buffer's textures are replaced (a freed address could otherwise match a
+    // stale cached state).
     const uint32_t w = r->GetWidth(), h = r->GetHeight();
     if (m_gbuffer.Width() != w || m_gbuffer.Height() != h) {
         r->WaitForGPU();
         m_gbuffer.Create(ctx.device, w, h);
+        m_graph.ResetStateCache();
     }
+
+    // Barriers are no longer hand-written: each pass DECLARES the state it needs
+    // its resources in, and the graph diffs against the previous frame to emit
+    // the transitions (G-buffer COMMON/PSR->RT for geometry, RT->PSR for
+    // lighting). Reorder or drop a pass and the barriers follow automatically.
+    m_graph.Begin(cmd);
+    m_graph.SetProfiler(&r->GetProfiler());
+    const RgHandle gAlb  = m_graph.Import("GB.Albedo",   m_gbuffer.Resource(0), RgState::Common);
+    const RgHandle gNrm  = m_graph.Import("GB.Normal",   m_gbuffer.Resource(1), RgState::Common);
+    const RgHandle gPos  = m_graph.Import("GB.Position", m_gbuffer.Resource(2), RgState::Common);
+    const RgHandle depth = m_graph.Import("SceneDepth",  r->DepthResource(),    RgState::DepthWrite);
+    const RgHandle back  = m_graph.Import("BackBuffer",  r->BackBufferResource(), RgState::RenderTarget);
 
     // ---- Geometry pass: fill the G-buffer (MRT). ----
-    m_gbuffer.TransitionToRenderTargets(cmd);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[GBuffer::kCount] = {
-        m_gbuffer.Rtv(0), m_gbuffer.Rtv(1), m_gbuffer.Rtv(2)
-    };
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv = r->GetDepthDSV();
-    cmd->OMSetRenderTargets(GBuffer::kCount, rtvs, FALSE, &dsv);
-    m_gbuffer.ClearRenderTargets(cmd); // depth was cleared by Renderer::BeginFrame
-    cmd->SetGraphicsRootSignature(m_geoRootSig.Get());
-    cmd->SetPipelineState(m_geoPSO.Get());
-    // Same RenderSystem as the forward scenes — it only binds per-object CBVs and
-    // draws; the bound PSO decides this writes the G-buffer instead of shading.
-    ctx.renderSystem->Render(m_world, *ctx.camera, *ctx.objectCB, cmd, ctx.rootParamIndexCBV);
+    m_graph.AddPass("Geometry",
+        { Write(gAlb, RgState::RenderTarget), Write(gNrm, RgState::RenderTarget),
+          Write(gPos, RgState::RenderTarget), Write(depth, RgState::DepthWrite) },
+        [this, r, &ctx](ID3D12GraphicsCommandList* c) {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[GBuffer::kCount] = {
+                m_gbuffer.Rtv(0), m_gbuffer.Rtv(1), m_gbuffer.Rtv(2)
+            };
+            D3D12_CPU_DESCRIPTOR_HANDLE dsv = r->GetDepthDSV();
+            c->OMSetRenderTargets(GBuffer::kCount, rtvs, FALSE, &dsv);
+            m_gbuffer.ClearRenderTargets(c); // depth was cleared by Renderer::BeginFrame
+            c->SetGraphicsRootSignature(m_geoRootSig.Get());
+            c->SetPipelineState(m_geoPSO.Get());
+            // Same RenderSystem as the forward scenes — it only binds per-object
+            // CBVs and draws; the bound PSO decides this writes the G-buffer.
+            ctx.renderSystem->Render(m_world, *ctx.camera, *ctx.objectCB, c, ctx.rootParamIndexCBV);
+        });
 
     // ---- Lighting pass: fullscreen, sample G-buffer, accumulate lights. ----
-    m_gbuffer.TransitionToShaderResources(cmd);
-    D3D12_CPU_DESCRIPTOR_HANDLE backRtv = r->GetBackBufferRTV();
-    cmd->OMSetRenderTargets(1, &backRtv, FALSE, nullptr);
-    cmd->SetGraphicsRootSignature(m_lightRootSig.Get());
-    cmd->SetPipelineState(m_lightPSO.Get());
+    // sideEffect: it writes the swap-chain back buffer, whose consumption is
+    // invisible to the graph, so it must never be culled (and keeps the
+    // geometry pass, which feeds it, alive too).
+    m_graph.AddPass("Lighting",
+        { Read(gAlb, RgState::PixelShader), Read(gNrm, RgState::PixelShader),
+          Read(gPos, RgState::PixelShader), Write(back, RgState::RenderTarget) },
+        [this, r, &ctx](ID3D12GraphicsCommandList* c) {
+            D3D12_CPU_DESCRIPTOR_HANDLE backRtv = r->GetBackBufferRTV();
+            c->OMSetRenderTargets(1, &backRtv, FALSE, nullptr);
+            c->SetGraphicsRootSignature(m_lightRootSig.Get());
+            c->SetPipelineState(m_lightPSO.Get());
 
-    ID3D12DescriptorHeap* heaps[] = { m_gbuffer.SrvHeap() };
-    cmd->SetDescriptorHeaps(1, heaps);
-    cmd->SetGraphicsRootDescriptorTable(0, m_gbuffer.SrvTable());
+            ID3D12DescriptorHeap* heaps[] = { m_gbuffer.SrvHeap() };
+            c->SetDescriptorHeaps(1, heaps);
+            c->SetGraphicsRootDescriptorTable(0, m_gbuffer.SrvTable());
 
-    if (ctx.objectCB->BindCbv(cmd, 1, m_lightData)) {
-        cmd->IASetVertexBuffers(0, 0, nullptr); // fullscreen triangle from SV_VertexID
-        cmd->DrawInstanced(3, 1, 0, 0);
-    }
+            if (ctx.objectCB->BindCbv(c, 1, m_lightData)) {
+                c->IASetVertexBuffers(0, 0, nullptr); // fullscreen triangle from SV_VertexID
+                c->DrawInstanced(3, 1, 0, 0);
+            }
+        },
+        /*sideEffect*/ true);
+
+    m_graph.Execute();
 }
 
 void DeferredScene::OnImGui() {

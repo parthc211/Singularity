@@ -12,6 +12,8 @@ public:
     void Reset() { m_resource.Reset(); }
 
     D3D12_CPU_DESCRIPTOR_HANDLE GetDSV() const;
+    // Underlying resource, so passes can import it into the RenderGraph.
+    ID3D12Resource* Resource() const { return m_resource.Get(); }
 
 private:
     ComPtr<ID3D12Resource>       m_resource;

@@ -6,6 +6,7 @@
 #include "Renderer/DX12/CommandContext.h"
 #include "Renderer/DX12/DepthBuffer.h"
 #include "Renderer/DX12/GpuHeap.h"
+#include "Profiling/GpuProfiler.h"
 
 #include <cstdint>
 
@@ -44,12 +45,19 @@ public:
     // WaitForGPU in Shutdown.
     GpuHeap& GetGeometryHeap() { return m_geometryHeap; }
 
+    // Per-region GPU timing. Renderer drives its per-frame lifecycle; scenes /
+    // the render graph add regions, and the app reads results for the overlay.
+    GpuProfiler& GetProfiler() { return m_profiler; }
+
     uint32_t GetWidth()  const { return m_width;  }
     uint32_t GetHeight() const { return m_height; }
     // Back buffer + depth handles, for passes that re-bind targets mid-frame
     // (e.g. deferred rendering: geometry pass -> G-buffer, lighting pass -> back buffer).
     D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRTV() const { return m_swapChain.GetCurrentRTV(); }
     D3D12_CPU_DESCRIPTOR_HANDLE GetDepthDSV()      const { return m_depthBuffer.GetDSV(); }
+    // Underlying resources for RenderGraph imports (state-transitioned by passes).
+    ID3D12Resource* BackBufferResource() const { return m_swapChain.GetCurrentBackBuffer(); }
+    ID3D12Resource* DepthResource()      const { return m_depthBuffer.Resource(); }
 
     // Rebind the swap-chain back buffer + main depth and restore the full
     // window viewport/scissor — the sequence every offscreen pass repeats to
@@ -62,6 +70,7 @@ private:
     CommandContext  m_commandContext;
     DepthBuffer     m_depthBuffer;
     GpuHeap         m_geometryHeap;
+    GpuProfiler     m_profiler;
 
     ComPtr<ID3D12Fence> m_fence;
     HANDLE              m_fenceEvent    = nullptr;

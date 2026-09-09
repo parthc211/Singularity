@@ -4,6 +4,7 @@
 #include "Renderer/DX12/GBuffer.h"
 #include "Renderer/DX12/RootSignature.h"
 #include "Renderer/DX12/GraphicsPipeline.h"
+#include "Renderer/RenderGraph/RenderGraph.h"
 #include "Renderer/ShaderLibrary.h"
 
 #include <DirectXMath.h>
@@ -71,6 +72,7 @@ private:
     SGE::GraphicsPipeline    m_geoPSO;
     SGE::RootSignature       m_lightRootSig;
     SGE::GraphicsPipeline    m_lightPSO;
+    SGE::RenderGraph         m_graph;   // schedules the geometry + lighting passes
 
     std::vector<LightAnim>   m_anims;
     LightData                m_lightData = {};
