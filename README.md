@@ -8,7 +8,7 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **17 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **18 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
@@ -23,6 +23,7 @@ The Sandbox app is a single executable hosting **17 interactive demos**, selecta
 | **HDR + Bloom** | HDR render target → bright-pass → separable Gaussian blur → ACES tonemap |
 | **SSAO** | Screen-space ambient occlusion over the deferred G-buffer |
 | **Texture / Normal / PBR Mapping** | The material pipeline: sRGB albedo, tangent-space normal maps (TBN from baked tangents), parallax occlusion mapping with contact shadows (height in the normal map's alpha), and an ORM map driving a Cook-Torrance GGX BRDF; CPU-mipped WIC textures with a procedural brick fallback |
+| **Image-Based Lighting** | Compute-baked IBL from a procedural HDR sky: environment cube → irradiance cube (diffuse) + prefiltered-mip cube (specular) + BRDF LUT (split-sum). A roughness×metalness sphere grid lit entirely from the environment, under a skybox |
 | **Cascaded Shadow Maps** | 4-cascade CSM with bounding-sphere fit + texel snapping (stable, shimmer-free) |
 | **Job System** | Work-stealing thread pool recording DX12 command lists in parallel, with a single/multi A/B toggle |
 | **Physics: Stacks & Rain** | Hand-written rigid-body solver — stable 10-box stacks, body rain, live tunables, contact overlay |
@@ -37,6 +38,7 @@ The Sandbox app is a single executable hosting **17 interactive demos**, selecta
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
+- **IBL:** `IblEnvironment` bakes image-based lighting from a procedural HDR sky via compute — environment cube → cosine-convolved irradiance cube (diffuse) + GGX-prefiltered mip cube (specular) + a split-sum BRDF LUT — on a self-contained blocking command list, feeding a real ambient term into the PBR BRDF.
 - **Profiling:** `GpuProfiler` times regions with DX12 timestamp queries (per-frame-slot readback resolved ~`FrameCount` frames later, after the fence wait, so no stall); the render graph auto-wraps every pass, so per-pass GPU cost is free. `CpuProfiler` adds nested RAII CPU scope timers. Both feed a live ImGui overlay (a `Scene ▸ pass` tree with millisecond timings).
 - **Physics:** a from-scratch 3D rigid-body engine (`Physics::PhysicsWorld`) built entirely on the engine's own SIMD math: sphere/capsule/box/plane colliders, SAT box-box narrowphase with Sutherland–Hodgman clipping, a warm-started sequential-impulse solver (accumulated & clamped impulses, friction cones, restitution, split-impulse position correction with a Baumgarte A/B, speculative contacts), persistent manifolds, a spatial-hash broadphase, island-based sleeping (displacement-anchor quietness, whole-island wake), and ball/hinge/distance joints with energy-neutral NGS position correction — stepped at fixed 120 Hz substeps, single-threaded or JobSystem-parallel with bit-identical trajectories.
 - **Animation:** a skeletal-animation stack built on the engine's SIMD math — `Skeleton` (flat parent-before-child joint arrays, inverse binds), sparse keyframe `AnimationClip`s, cursor-cached sampling (slerp), pose blending (nlerp), single-pass pose propagation and bone-palette generation, GPU-skinned in the vertex shader (4 weights, 256-joint palette CBV).
@@ -76,12 +78,13 @@ Singularity/
 │       ├── Math/       # SimdMath, ScalarMath, benchmarks
 │       ├── Memory/     # Arena / Stack / Pool / FreeList allocators
 │       ├── Physics/    # rigid bodies, narrowphase, solver, broadphase, joints
-│       ├── Renderer/   # Renderer, ShaderLibrary, Mesh/SkinnedMesh, ImageLoader, + DX12/ and DXC/
+│       ├── Profiling/  # GpuProfiler (timestamp queries), CpuProfiler
+│       ├── Renderer/   # Renderer, ShaderLibrary, Mesh/SkinnedMesh, ImageLoader, + DX12/, DXC/, RenderGraph/, IBL/
 │       ├── Scene/      # ECS (World/Entity/SparseSet), RenderSystem, SceneManager
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 17 demo scenes
+    ├── Scenes/         # the 18 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
@@ -97,7 +100,7 @@ Singularity/
 **Portfolio polish (next up):**
 - [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
-- [ ] Demo reel — a short video walking all 17 scenes
+- [ ] Demo reel — a short video walking all 18 scenes
 
 **Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
 - [~] Render graph (frame graph) — **scheduling + culling done**: passes declare per-resource read/write states (`RenderGraph::Import`/`AddPass`/`Execute`), the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread. The `Render Graph` demo prints the live compiled schedule/barriers/culling; `DeferredScene` is migrated off manual `GBuffer::TransitionToX` calls. **Phase 2 (TODO):** graph-owned *transient* resources + lifetime-based memory aliasing (the `Import` API is the seam it slots into)
@@ -105,7 +108,7 @@ Singularity/
 - [ ] Reflection + serialization — compile-time C++ field reflection (à la `UPROPERTY`); the substrate for scene save/load, an auto-generated inspector, and scripting bindings
 
 **Rendering — completing the modern rasterizer:**
-- [ ] IBL (image-based lighting) — irradiance (SH) + prefiltered env cubemap + BRDF LUT (split-sum); the missing ambient half of the existing GGX BRDF (metals currently use an F0 placeholder)
+- [~] IBL (image-based lighting) — **done:** compute-baked irradiance cube + prefiltered-mip env cube + BRDF LUT (split-sum) from a procedural HDR sky, driving a real ambient term in the `Image-Based Lighting` demo (replaces the F0 placeholder). `IblEnvironment` (`Engine/src/Renderer/IBL`) owns the bake; cube UAV writes added `RootSignatureBuilder::UavTable`/`Constants`. **TODO:** load real `.hdr`/`.exr` equirectangular environments (procedural sky is featureless, so reflections read as gradients); SH irradiance as a compact alternative; wire IBL ambient into the Normal-Map/PBR demo too
 - [ ] Clustered / tiled forward+ shading — froxel light culling for thousands of lights and lit transparency (removes the deferred 64-light cap)
 - [ ] TAA + motion vectors — jittered temporal accumulation with history reprojection; motion vectors also drive motion blur, SSR, and temporal upsampling
 - [ ] Composable post-processing stack — auto-exposure/eye adaptation, DoF, motion blur, 3D-LUT color grading, vignette/chromatic-aberration/film-grain; existing bloom becomes one node

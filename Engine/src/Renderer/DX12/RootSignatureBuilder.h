@@ -43,6 +43,18 @@ public:
     RootSignatureBuilder& SrvTable(UINT baseReg, UINT count,
                                    D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_PIXEL);
 
+    // Descriptor table of `count` contiguous UAVs starting at u<baseReg>. Needed
+    // to write textures from compute (e.g. cube faces as a RWTexture2DArray) —
+    // textures can't be bound as root UAVs. Defaults to ALL for compute use.
+    RootSignatureBuilder& UavTable(UINT baseReg, UINT count,
+                                   D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL);
+
+    // Inline 32-bit root constants at b<reg> — cheap per-dispatch params (a mip
+    // size, a roughness) with no constant buffer. Set with SetComputeRoot /
+    // SetGraphicsRoot32BitConstants.
+    RootSignatureBuilder& Constants(UINT reg, UINT num32BitValues,
+                                    D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL);
+
     // Static sampler presets covering every sampler the scenes use.
     RootSignatureBuilder& SamplerAnisoWrap(UINT reg);    // material textures
     RootSignatureBuilder& SamplerLinearClamp(UINT reg);  // post-process chains

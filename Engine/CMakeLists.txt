@@ -122,6 +122,8 @@ add_library(SingularityEngine STATIC
     src/Renderer/Renderer.cpp
     src/Renderer/RenderGraph/RenderGraph.h
     src/Renderer/RenderGraph/RenderGraph.cpp
+    src/Renderer/IBL/IblEnvironment.h
+    src/Renderer/IBL/IblEnvironment.cpp
     src/UI/ImGuiLayer.h
     src/UI/ImGuiLayer.cpp
 )

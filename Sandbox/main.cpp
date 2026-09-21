@@ -23,6 +23,7 @@
 #include "Scenes/BloomScene.h"
 #include "Scenes/SsaoScene.h"
 #include "Scenes/NormalMapScene.h"
+#include "Scenes/IblScene.h"
 #include "Scenes/CsmScene.h"
 #include "Scenes/JobScene.h"
 #include "Scenes/PhysicsScene.h"
@@ -202,6 +203,7 @@ protected:
         m_scenes.Add(std::make_unique<BloomScene>(&m_mesh));
         m_scenes.Add(std::make_unique<SsaoScene>(&m_mesh));
         m_scenes.Add(std::make_unique<NormalMapScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<IblScene>(&m_sphereMesh));
         m_scenes.Add(std::make_unique<CsmScene>(&m_mesh));
         m_scenes.Add(std::make_unique<JobScene>(&m_mesh));
         m_scenes.Add(std::make_unique<PhysicsScene>(&m_mesh, &m_sphereMesh, &m_capsuleMesh));

@@ -50,6 +50,36 @@ RootSignatureBuilder& RootSignatureBuilder::SrvTable(UINT baseReg, UINT count,
     return *this;
 }
 
+RootSignatureBuilder& RootSignatureBuilder::UavTable(UINT baseReg, UINT count,
+                                                     D3D12_SHADER_VISIBILITY vis)
+{
+    D3D12_DESCRIPTOR_RANGE range            = {};
+    range.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    range.NumDescriptors                    = count;
+    range.BaseShaderRegister                = baseReg;
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER p                    = {};
+    p.ParameterType                           = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    p.DescriptorTable.NumDescriptorRanges     = 1;
+    p.ShaderVisibility                        = vis;
+    m_tables.push_back({ m_params.size(), range });   // pointer patched in Build
+    m_params.push_back(p);
+    return *this;
+}
+
+RootSignatureBuilder& RootSignatureBuilder::Constants(UINT reg, UINT num32BitValues,
+                                                      D3D12_SHADER_VISIBILITY vis)
+{
+    D3D12_ROOT_PARAMETER p        = {};
+    p.ParameterType               = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    p.Constants.ShaderRegister    = reg;
+    p.Constants.Num32BitValues    = num32BitValues;
+    p.ShaderVisibility            = vis;
+    m_params.push_back(p);
+    return *this;
+}
+
 namespace {
 D3D12_STATIC_SAMPLER_DESC BaseSampler(UINT reg)
 {
