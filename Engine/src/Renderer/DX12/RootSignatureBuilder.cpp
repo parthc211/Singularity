@@ -68,6 +68,12 @@ RootSignatureBuilder& RootSignatureBuilder::UavTable(UINT baseReg, UINT count,
     return *this;
 }
 
+RootSignatureBuilder& RootSignatureBuilder::DirectlyIndexed()
+{
+    m_directlyIndexed = true;
+    return *this;
+}
+
 RootSignatureBuilder& RootSignatureBuilder::Constants(UINT reg, UINT num32BitValues,
                                                       D3D12_SHADER_VISIBILITY vis)
 {
@@ -145,6 +151,9 @@ bool RootSignatureBuilder::Build(ID3D12Device* device, RootSignature& out,
     // Range storage lives in m_tables (stable by now); patch the pointers.
     for (TableRange& t : m_tables)
         m_params[t.paramIndex].DescriptorTable.pDescriptorRanges = &t.range;
+
+    if (m_directlyIndexed)
+        flags |= D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
 
     return out.Create(device,
                       m_params.empty() ? nullptr : m_params.data(),

@@ -46,6 +46,8 @@ bool GraphicsDevice::Initialize(bool enableDebugLayer)
         queueDesc.NodeMask = 0;
         SGE_THROW_IF_FAILED(m_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_commandQueue)));
 
+        DetectCapabilities();
+
         {
             DXGI_ADAPTER_DESC1 desc;
             m_adapter->GetDesc1(&desc);
@@ -83,6 +85,27 @@ void GraphicsDevice::SelectAdapter()
     }
 
     throw std::runtime_error("No DX12-capable GPU found.");
+}
+
+void GraphicsDevice::DetectCapabilities()
+{
+    // Bindless needs SM 6.6 (the ResourceDescriptorHeap[] intrinsic) and
+    // resource-binding tier 3 (unbounded, fully dynamic descriptor indexing).
+    // CheckFeatureSupport caps HighestShaderModel to what the driver actually
+    // supports; an older driver may not know 6.6 and returns E_INVALIDARG.
+    D3D12_FEATURE_DATA_SHADER_MODEL sm = { D3D_SHADER_MODEL_6_6 };
+    const bool sm66 =
+        SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm)))
+        && sm.HighestShaderModel >= D3D_SHADER_MODEL_6_6;
+
+    D3D12_FEATURE_DATA_D3D12_OPTIONS opt = {};
+    const bool tier3 =
+        SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &opt, sizeof(opt)))
+        && opt.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
+
+    m_supportsBindless = sm66 && tier3;
+    LogInfo(m_supportsBindless ? "Bindless supported (SM 6.6 + resource-binding tier 3)."
+                               : "Bindless NOT supported on this GPU/driver.");
 }
 
 void GraphicsDevice::Shutdown()

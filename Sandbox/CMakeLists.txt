@@ -8,6 +8,8 @@ add_executable(Sandbox WIN32
     Scenes/GpuHeapScene.cpp
     Scenes/RenderGraphScene.h
     Scenes/RenderGraphScene.cpp
+    Scenes/BindlessScene.h
+    Scenes/BindlessScene.cpp
     Scenes/DeferredScene.h
     Scenes/DeferredScene.cpp
     Scenes/SimdMathScene.h

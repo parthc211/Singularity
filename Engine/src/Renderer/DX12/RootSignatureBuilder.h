@@ -55,6 +55,11 @@ public:
     RootSignatureBuilder& Constants(UINT reg, UINT num32BitValues,
                                     D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL);
 
+    // Flag the root signature so shaders may index the bound CBV/SRV/UAV heap
+    // directly (SM 6.6 ResourceDescriptorHeap[]) — the bindless path. No SRV/UAV
+    // tables are then needed; pass resource indices via root constants/CBVs.
+    RootSignatureBuilder& DirectlyIndexed();
+
     // Static sampler presets covering every sampler the scenes use.
     RootSignatureBuilder& SamplerAnisoWrap(UINT reg);    // material textures
     RootSignatureBuilder& SamplerLinearClamp(UINT reg);  // post-process chains
@@ -73,6 +78,7 @@ private:
     std::vector<D3D12_ROOT_PARAMETER>      m_params;
     std::vector<TableRange>                m_tables;   // pointers patched in Build
     std::vector<D3D12_STATIC_SAMPLER_DESC> m_samplers;
+    bool                                   m_directlyIndexed = false;
 };
 
 } // namespace SGE

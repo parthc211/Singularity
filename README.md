@@ -8,7 +8,7 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **18 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **19 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
@@ -16,6 +16,7 @@ The Sandbox app is a single executable hosting **18 interactive demos**, selecta
 | **GPU Heap Allocator** | Custom `ID3D12Heap` + first-fit free-list handing out *placed* resources, with a live heap map |
 | **Deferred Rendering** | 3-target MRT G-buffer + fullscreen lighting pass, up to 64 moving point lights (barriers scheduled by the render graph) |
 | **Render Graph** | Declarative multi-pass frame: passes declare per-resource states, the graph derives/batches all barriers and reference-count culls unused passes — with a live panel of the compiled schedule, per-pass barriers, and culling |
+| **Bindless** | SM 6.6 `ResourceDescriptorHeap[]`: a grid of cubes, each a different texture, drawn through one root signature with no per-draw descriptor tables — every texture in one heap, each cube passing only an integer index. Foundation for GPU-driven rendering and ray tracing |
 | **SIMD Math** | Hand-written SSE/AVX `Vec4`/`Mat4`/`Quat`, validated 1:1 against DirectXMath, with benchmarks |
 | **CPU Allocators** | Arena / Stack / Pool / Free-list allocators with live memory maps and vs-`malloc` timings |
 | **Tessellation** | Hull/domain-shader terrain, distance-based crack-free LOD, procedural fBm displacement |
@@ -33,6 +34,7 @@ The Sandbox app is a single executable hosting **18 interactive demos**, selecta
 ## Engine systems
 
 - **Renderer (DX12):** device/swap-chain/command-context bootstrap, root signatures, PSO management (MRT + tessellation capable), depth buffers, reusable render-target helpers (`GBuffer`, `ShadowMap`, `CascadedShadowMap`, `RenderTexture`), and sampled textures (`Texture2D`: WIC decoding, sRGB-aware CPU mip generation, staged DEFAULT-heap upload).
+- **Bindless:** SM 6.6 `ResourceDescriptorHeap[]` support — `GraphicsDevice` detects it, `BindlessHeap` is a shader-visible CBV/SRV/UAV heap with a persistent index allocator, and a directly-indexed root signature lets shaders fetch any resource by integer with no per-draw descriptor tables (the basis for GPU-driven rendering and ray tracing).
 - **Render graph:** a per-frame declarative pass scheduler (`RenderGraph`) — passes declare the state they need each resource in, and the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread, so barriers stop being hand-written per scene. Scheduling + culling are implemented (transient-resource memory aliasing is the planned Phase 2).
 - **Shaders:** compiled at runtime with **DXC** (SM 6.0); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
@@ -84,7 +86,7 @@ Singularity/
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 18 demo scenes
+    ├── Scenes/         # the 19 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
@@ -100,7 +102,7 @@ Singularity/
 **Portfolio polish (next up):**
 - [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
-- [ ] Demo reel — a short video walking all 18 scenes
+- [ ] Demo reel — a short video walking all 19 scenes
 
 **Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
 - [~] Render graph (frame graph) — **scheduling + culling done**: passes declare per-resource read/write states (`RenderGraph::Import`/`AddPass`/`Execute`), the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread. The `Render Graph` demo prints the live compiled schedule/barriers/culling; `DeferredScene` is migrated off manual `GBuffer::TransitionToX` calls. **Phase 2 (TODO):** graph-owned *transient* resources + lifetime-based memory aliasing (the `Import` API is the seam it slots into)
@@ -126,7 +128,7 @@ Singularity/
 - [ ] Atmosphere & ocean — physically-based sky (Hillaire aerial perspective) and FFT ocean (Tessendorf) as set-pieces
 
 **Low-level systems:**
-- [ ] Bindless / descriptor indexing — SM 6.6 `ResourceDescriptorHeap`; materials index resources by integer (prerequisite for GPU-driven rendering and DXR)
+- [~] Bindless / descriptor indexing — **done:** SM 6.6 `ResourceDescriptorHeap[]` infrastructure — `GraphicsDevice` feature detection (SM 6.6 + binding tier 3), a persistent `BindlessHeap` index allocator, and `RootSignatureBuilder::DirectlyIndexed`; the `Bindless` demo draws a differently-textured cube grid through one root signature with zero per-draw tables. **TODO:** migrate existing scenes to a single global bindless heap; index material/constant buffers (not just textures) — the GPU-driven/DXR prerequisite is in place
 - [ ] Multi-queue — async compute queue (SSAO/particles/light-culling overlapping graphics) + copy queue for streaming uploads, fence-synced
 - [ ] RHI abstraction — pull DX12 behind an `IRenderDevice`/`ICommandList` seam (design for a future Vulkan backend even if stubbed)
 - [ ] Full GPU allocator + residency — extend `GpuHeap` to multi-heap, budget-aware, `MakeResident`/`Evict` residency management + defrag (à la D3D12MA)

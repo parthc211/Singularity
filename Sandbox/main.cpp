@@ -15,6 +15,7 @@
 #include "Scenes/SingleCubeScene.h"
 #include "Scenes/GpuHeapScene.h"
 #include "Scenes/RenderGraphScene.h"
+#include "Scenes/BindlessScene.h"
 #include "Scenes/DeferredScene.h"
 #include "Scenes/SimdMathScene.h"
 #include "Scenes/AllocatorScene.h"
@@ -196,6 +197,7 @@ protected:
         m_scenes.Add(std::make_unique<GpuHeapScene>());
         m_scenes.Add(std::make_unique<DeferredScene>(&m_mesh));
         m_scenes.Add(std::make_unique<RenderGraphScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<BindlessScene>(&m_mesh));
         m_scenes.Add(std::make_unique<SimdMathScene>());
         m_scenes.Add(std::make_unique<AllocatorScene>());
         m_scenes.Add(std::make_unique<TessellationScene>());
