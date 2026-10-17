@@ -8,13 +8,14 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **19 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **24 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
 | **Cube Grid / Single Cube** | Forward rendering, ECS-driven draws, per-object constant arena |
 | **GPU Heap Allocator** | Custom `ID3D12Heap` + first-fit free-list handing out *placed* resources, with a live heap map |
 | **Deferred Rendering** | 3-target MRT G-buffer + fullscreen lighting pass, up to 64 moving point lights (barriers scheduled by the render graph) |
+| **Clustered Shading** | Froxel (view-frustum voxel) light culling: compute builds per-froxel AABBs, a second compute pass atomic-appends hundreds of moving lights into per-froxel lists, and the forward pass loops only each pixel's froxel lights — with a lights-per-froxel heatmap view |
 | **Render Graph** | Declarative multi-pass frame: passes declare per-resource states, the graph derives/batches all barriers and reference-count culls unused passes — with a live panel of the compiled schedule, per-pass barriers, and culling |
 | **Bindless** | SM 6.6 `ResourceDescriptorHeap[]`: a grid of cubes, each a different texture, drawn through one root signature with no per-draw descriptor tables — every texture in one heap, each cube passing only an integer index. Foundation for GPU-driven rendering and ray tracing |
 | **SIMD Math** | Hand-written SSE/AVX `Vec4`/`Mat4`/`Quat`, validated 1:1 against DirectXMath, with benchmarks |
@@ -22,7 +23,11 @@ The Sandbox app is a single executable hosting **19 interactive demos**, selecta
 | **Tessellation** | Hull/domain-shader terrain, distance-based crack-free LOD, procedural fBm displacement |
 | **Shadow Mapping** | Directional shadow map with hardware PCF (comparison sampler) |
 | **HDR + Bloom** | HDR render target → bright-pass → separable Gaussian blur → ACES tonemap |
+| **Post-Processing** | A composable post stack over an HDR target, run through the render graph: compute eye-adaptation → bloom → a composite doing ACES tonemap, colour grade, vignette, chromatic aberration and film grain — every effect a live toggle |
+| **Temporal AA** | Sub-pixel jittered projection + a motion-vector target, resolved by reprojecting the previous frame's result and neighbourhood-clamping history to kill ghosting — accumulated jitter = supersampled edges, with an A/B toggle vs. raw aliasing |
 | **SSAO** | Screen-space ambient occlusion over the deferred G-buffer |
+| **Screen-Space Reflections** | View-space G-buffer (colour+reflectivity / normal / position) + a resolve pass that reflects each view ray and ray-marches the depth buffer, compositing hits by reflectivity × Fresnel × edge fade — a reflective floor mirroring the objects, with the on-screen-only limitation visible |
+| **Order-Independent Transparency** | Weighted-blended OIT: overlapping translucent spheres accumulated into additive-colour + multiplicative-revealage targets (independent per-target blend) with depth-weighted weighting, composited over the opaque scene — correct at any draw order, with a naive-alpha A/B toggle |
 | **Texture / Normal / PBR Mapping** | The material pipeline: sRGB albedo, tangent-space normal maps (TBN from baked tangents), parallax occlusion mapping with contact shadows (height in the normal map's alpha), and an ORM map driving a Cook-Torrance GGX BRDF; CPU-mipped WIC textures with a procedural brick fallback |
 | **Image-Based Lighting** | Compute-baked IBL from a procedural HDR sky: environment cube → irradiance cube (diffuse) + prefiltered-mip cube (specular) + BRDF LUT (split-sum). A roughness×metalness sphere grid lit entirely from the environment, under a skybox |
 | **Cascaded Shadow Maps** | 4-cascade CSM with bounding-sphere fit + texel snapping (stable, shimmer-free) |
@@ -35,6 +40,11 @@ The Sandbox app is a single executable hosting **19 interactive demos**, selecta
 
 - **Renderer (DX12):** device/swap-chain/command-context bootstrap, root signatures, PSO management (MRT + tessellation capable), depth buffers, reusable render-target helpers (`GBuffer`, `ShadowMap`, `CascadedShadowMap`, `RenderTexture`), and sampled textures (`Texture2D`: WIC decoding, sRGB-aware CPU mip generation, staged DEFAULT-heap upload).
 - **Bindless:** SM 6.6 `ResourceDescriptorHeap[]` support — `GraphicsDevice` detects it, `BindlessHeap` is a shader-visible CBV/SRV/UAV heap with a persistent index allocator, and a directly-indexed root signature lets shaders fetch any resource by integer with no per-draw descriptor tables (the basis for GPU-driven rendering and ray tracing).
+- **Order-independent transparency:** weighted-blended OIT (`OitScene`) — transparent geometry accumulated into an additive colour buffer and a multiplicative revealage buffer via independent per-target blend states, depth-weighted so nearer surfaces dominate, then resolved over the opaque image; needs no sorting. Added blend-state and depth-test-without-write support to `GraphicsPipeline`.
+- **Screen-space reflections:** a view-space G-buffer + ray-march resolve (`SsrScene`) — reflects each pixel's view ray, marches it through the stored depth/position with an accelerating step and binary refinement, and composites the hit colour by reflectivity, Fresnel and a screen-edge fade.
+- **Clustered shading:** a froxel light-culling path (`ClusteredScene`) — a compute pass builds view-space froxel AABBs, a second atomic-appends overlapping lights into per-froxel index lists (bound as structured buffers via root descriptors), and a clustered forward pass reconstructs each pixel's froxel and loops only its lights, so cost tracks local light density rather than total count.
+- **Temporal AA:** a jittered-projection + motion-vector (`TaaScene`) pipeline — geometry writes colour and screen-space velocity (from un-jittered clip), and a resolve pass reprojects and neighbourhood-clamps a ping-ponged history buffer, so sub-pixel jitter accumulates into supersampled, stable edges.
+- **Post-processing:** a composable chain expressed as render-graph passes over an HDR target — a compute eye-adaptation pass (geometric-mean scene luminance adapted over time into a persistent 1×1 target), bloom (bright-pass + separable Gaussian ping-pong), and a composite applying ACES tonemap, analytic colour grading, vignette, chromatic aberration and film grain.
 - **Render graph:** a per-frame declarative pass scheduler (`RenderGraph`) — passes declare the state they need each resource in, and the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread, so barriers stop being hand-written per scene. Scheduling + culling are implemented (transient-resource memory aliasing is the planned Phase 2).
 - **Shaders:** compiled at runtime with **DXC** (SM 6.0); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
@@ -86,7 +96,7 @@ Singularity/
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 19 demo scenes
+    ├── Scenes/         # the 24 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
@@ -102,7 +112,7 @@ Singularity/
 **Portfolio polish (next up):**
 - [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
-- [ ] Demo reel — a short video walking all 19 scenes
+- [ ] Demo reel — a short video walking all 24 scenes
 
 **Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
 - [~] Render graph (frame graph) — **scheduling + culling done**: passes declare per-resource read/write states (`RenderGraph::Import`/`AddPass`/`Execute`), the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread. The `Render Graph` demo prints the live compiled schedule/barriers/culling; `DeferredScene` is migrated off manual `GBuffer::TransitionToX` calls. **Phase 2 (TODO):** graph-owned *transient* resources + lifetime-based memory aliasing (the `Import` API is the seam it slots into)
@@ -111,11 +121,11 @@ Singularity/
 
 **Rendering — completing the modern rasterizer:**
 - [~] IBL (image-based lighting) — **done:** compute-baked irradiance cube + prefiltered-mip env cube + BRDF LUT (split-sum) from a procedural HDR sky, driving a real ambient term in the `Image-Based Lighting` demo (replaces the F0 placeholder). `IblEnvironment` (`Engine/src/Renderer/IBL`) owns the bake; cube UAV writes added `RootSignatureBuilder::UavTable`/`Constants`. **TODO:** load real `.hdr`/`.exr` equirectangular environments (procedural sky is featureless, so reflections read as gradients); SH irradiance as a compact alternative; wire IBL ambient into the Normal-Map/PBR demo too
-- [ ] Clustered / tiled forward+ shading — froxel light culling for thousands of lights and lit transparency (removes the deferred 64-light cap)
-- [ ] TAA + motion vectors — jittered temporal accumulation with history reprojection; motion vectors also drive motion blur, SSR, and temporal upsampling
-- [ ] Composable post-processing stack — auto-exposure/eye adaptation, DoF, motion blur, 3D-LUT color grading, vignette/chromatic-aberration/film-grain; existing bloom becomes one node
-- [ ] SSR + reflection probes — screen-space depth ray-march with baked cubemap probe fallback for off-screen/edge misses
-- [ ] Transparency / OIT — weighted-blended OIT or a sorted forward transparent pass (everything is opaque today)
+- [~] Clustered / tiled forward+ shading — **done:** a froxel grid (screen tiles × exponential depth slices), a compute AABB-build pass, a compute light-culling pass (sphere-vs-AABB, atomic-appended per-froxel index lists) and a clustered forward shade pass looping only each pixel's froxel lights, in the `Clustered Shading` demo (hundreds of lights + heatmap view). **TODO:** depth prepass to skip occluded shading; apply it to transparent geometry (its real advantage over deferred) once OIT lands
+- [~] TAA + motion vectors — **done:** Halton-jittered projection + a screen-space motion-vector target (from un-jittered clip positions), resolved by reprojecting history and clamping to the 3×3 neighbourhood AABB, ping-ponged across frames, in the `Temporal AA` demo (A/B toggle vs. no-AA). **TODO:** per-object motion vectors for moving geometry (prev-model tracking), then reuse the velocity buffer for motion blur + a DoF node in the post stack, and temporal upsampling
+- [~] Composable post-processing stack — **done:** a render-graph chain over an HDR target in the `Post-Processing` demo — compute **eye-adaptation** (auto-exposure), bloom (bright-pass + separable blur), then a composite doing ACES tonemap, analytic colour grade (contrast/saturation/temperature), vignette, chromatic aberration and film grain, each a live toggle. **TODO:** depth of field, motion blur (needs motion vectors), 3D-LUT grading
+- [~] SSR + reflection probes — **done:** screen-space reflections in the `Screen-Space Reflections` demo — a view-space G-buffer fed to a resolve pass that reflects each view ray, marches it through the depth buffer (accelerating step + binary refinement), and composites the hit by reflectivity × Fresnel × edge fade. **TODO:** a baked cubemap reflection-probe fallback for off-screen/edge misses; reuse the IBL prefiltered cube for rough reflections
+- [x] Transparency / OIT — **weighted-blended OIT** (McGuire/Bavoil) in the `Order-Independent Transparency` demo: an opaque pass, then transparent geometry accumulated into additive-colour + multiplicative-revealage targets via independent per-target blend (depth-weighted), resolved over the opaque image — correct in any draw order, with a naive-alpha A/B toggle. Added `GraphicsPipeline` blend-state + depth-test-without-write support
 
 **Rendering — frontiers:**
 - [ ] DXR (hardware ray tracing) — BLAS/TLAS + shader binding table + ray-gen/hit/miss; ship RT shadows → reflections/AO → reference path tracer

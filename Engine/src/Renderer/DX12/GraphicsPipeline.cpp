@@ -42,7 +42,8 @@ bool GraphicsPipeline::BuildPSO(ID3D12Device* device)
         psoDesc.RasterizerState.DepthClipEnable       = TRUE;
 
         psoDesc.DepthStencilState.DepthEnable    = m_desc.depthEnable ? TRUE : FALSE;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        psoDesc.DepthStencilState.DepthWriteMask = m_desc.depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL
+                                                                     : D3D12_DEPTH_WRITE_MASK_ZERO;
         psoDesc.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
         psoDesc.DepthStencilState.StencilEnable  = FALSE;
         psoDesc.DSVFormat                        = m_desc.depthEnable ? m_desc.dsvFormat : DXGI_FORMAT_UNKNOWN;
@@ -55,9 +56,16 @@ bool GraphicsPipeline::BuildPSO(ID3D12Device* device)
         // pass sets rtvCount/rtvFormats for its MRT G-buffer; rtvCount == 0 is a
         // depth-only pass (shadow map) — no colour targets at all.
         psoDesc.NumRenderTargets = m_desc.rtvCount;
-        for (uint32_t i = 0; i < m_desc.rtvCount; ++i) {
+        for (uint32_t i = 0; i < m_desc.rtvCount; ++i)
             psoDesc.RTVFormats[i] = (m_desc.rtvCount <= 1) ? m_desc.rtvFormat : m_desc.rtvFormats[i];
-            psoDesc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        if (m_desc.blendEnable) {
+            // Caller-supplied blend (alpha blending, OIT's independent per-target
+            // blend, ...). The caller sets each target's write mask.
+            psoDesc.BlendState = m_desc.blend;
+        } else {
+            for (uint32_t i = 0; i < m_desc.rtvCount; ++i)
+                psoDesc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         }
 
         SGE_THROW_IF_FAILED(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pso)));

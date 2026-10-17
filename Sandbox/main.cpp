@@ -22,6 +22,11 @@
 #include "Scenes/TessellationScene.h"
 #include "Scenes/ShadowScene.h"
 #include "Scenes/BloomScene.h"
+#include "Scenes/PostProcessScene.h"
+#include "Scenes/TaaScene.h"
+#include "Scenes/ClusteredScene.h"
+#include "Scenes/SsrScene.h"
+#include "Scenes/OitScene.h"
 #include "Scenes/SsaoScene.h"
 #include "Scenes/NormalMapScene.h"
 #include "Scenes/IblScene.h"
@@ -203,6 +208,11 @@ protected:
         m_scenes.Add(std::make_unique<TessellationScene>());
         m_scenes.Add(std::make_unique<ShadowScene>(&m_mesh));
         m_scenes.Add(std::make_unique<BloomScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<PostProcessScene>(&m_sphereMesh));
+        m_scenes.Add(std::make_unique<TaaScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<ClusteredScene>(&m_mesh));
+        m_scenes.Add(std::make_unique<SsrScene>(&m_mesh, &m_sphereMesh));
+        m_scenes.Add(std::make_unique<OitScene>(&m_mesh, &m_sphereMesh));
         m_scenes.Add(std::make_unique<SsaoScene>(&m_mesh));
         m_scenes.Add(std::make_unique<NormalMapScene>(&m_mesh));
         m_scenes.Add(std::make_unique<IblScene>(&m_sphereMesh));

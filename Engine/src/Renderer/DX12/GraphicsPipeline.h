@@ -25,6 +25,14 @@ struct GraphicsPipelineDesc
     D3D12_PRIMITIVE_TOPOLOGY_TYPE topologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     D3D12_CULL_MODE               cullMode     = D3D12_CULL_MODE_BACK;
     bool                          wireframe    = false;
+    // Depth test without writing (depthEnable stays on) — transparent passes read
+    // the opaque depth but must not occlude each other.
+    bool                          depthWrite   = true;
+    // Custom blend. Leave blendEnable false for opaque (the default). Set it and
+    // fill `blend` (including each target's RenderTargetWriteMask) for alpha
+    // blending or the independent per-target blend weighted-blended OIT needs.
+    bool                          blendEnable  = false;
+    D3D12_BLEND_DESC              blend        = {};
     // Input layout is derived automatically from vs->inputLayout (via reflection);
     // a VS with no vertex inputs (e.g. a fullscreen-triangle pass) yields an empty one.
 };
