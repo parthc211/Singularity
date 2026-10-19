@@ -38,6 +38,8 @@ public:
     ID3D12GraphicsCommandList* GetCommandList()  const;
     // SM 6.6 + tier-3 bindless support (ResourceDescriptorHeap[]).
     bool                       SupportsBindless() const { return m_graphicsDevice.SupportsBindless(); }
+    // DXR raytracing support (tier 1.0+).
+    bool                       SupportsRaytracing() const { return m_graphicsDevice.SupportsRaytracing(); }
     // The single direct queue — needed by Texture2D's blocking staging upload.
     ID3D12CommandQueue*        GetCommandQueue() const;
     uint32_t                   GetFrameIndex()  const { return m_frameIndex; }

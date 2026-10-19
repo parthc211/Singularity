@@ -27,6 +27,8 @@
 #include "Scenes/ClusteredScene.h"
 #include "Scenes/SsrScene.h"
 #include "Scenes/OitScene.h"
+#include "Scenes/RtScene.h"
+#include "Scenes/GpuDrivenScene.h"
 #include "Scenes/SsaoScene.h"
 #include "Scenes/NormalMapScene.h"
 #include "Scenes/IblScene.h"
@@ -179,19 +181,19 @@ protected:
         std::vector<SGE::MeshVertex> verts;
         std::vector<uint32_t>        indices;
         if (SGE::LoadOBJ("Assets/cube.obj", verts, indices))
-            m_mesh.Upload(device, GetRenderer().GetGeometryHeap(), verts, indices);
+            m_mesh.Upload(device, GetRenderer().GetCommandQueue(), verts, indices);
 
         // Procedural unit sphere + unit-proportion capsule for the physics
         // scenes (both scaled per body).
         verts.clear();
         indices.clear();
         BuildUvSphere(verts, indices);
-        m_sphereMesh.Upload(device, GetRenderer().GetGeometryHeap(), verts, indices);
+        m_sphereMesh.Upload(device, GetRenderer().GetCommandQueue(), verts, indices);
 
         verts.clear();
         indices.clear();
         BuildUvCapsule(verts, indices);
-        m_capsuleMesh.Upload(device, GetRenderer().GetGeometryHeap(), verts, indices);
+        m_capsuleMesh.Upload(device, GetRenderer().GetCommandQueue(), verts, indices);
 
         // Register the demo scenes. Each owns its own ECS World; they share this
         // app's cube mesh, upload arena, RenderSystem, root sig and PSO. Activate
@@ -213,6 +215,8 @@ protected:
         m_scenes.Add(std::make_unique<ClusteredScene>(&m_mesh));
         m_scenes.Add(std::make_unique<SsrScene>(&m_mesh, &m_sphereMesh));
         m_scenes.Add(std::make_unique<OitScene>(&m_mesh, &m_sphereMesh));
+        m_scenes.Add(std::make_unique<RtScene>(&m_mesh, &m_sphereMesh));
+        m_scenes.Add(std::make_unique<GpuDrivenScene>());
         m_scenes.Add(std::make_unique<SsaoScene>(&m_mesh));
         m_scenes.Add(std::make_unique<NormalMapScene>(&m_mesh));
         m_scenes.Add(std::make_unique<IblScene>(&m_sphereMesh));

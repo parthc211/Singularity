@@ -106,6 +106,14 @@ void GraphicsDevice::DetectCapabilities()
     m_supportsBindless = sm66 && tier3;
     LogInfo(m_supportsBindless ? "Bindless supported (SM 6.6 + resource-binding tier 3)."
                                : "Bindless NOT supported on this GPU/driver.");
+
+    // DXR: raytracing tier 1.0+ (acceleration structures, DispatchRays).
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 opt5 = {};
+    m_supportsRaytracing =
+        SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opt5, sizeof(opt5)))
+        && opt5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0;
+    LogInfo(m_supportsRaytracing ? "Raytracing (DXR) supported."
+                                 : "Raytracing (DXR) NOT supported on this GPU/driver.");
 }
 
 void GraphicsDevice::Shutdown()

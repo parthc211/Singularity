@@ -123,13 +123,15 @@ std::shared_ptr<ShaderBlob> DxcInstance::Compile(
     std::wstring wEntry(entryPoint, entryPoint + strlen(entryPoint));
     std::wstring wTarget(target,    target    + strlen(target));
 
-    std::vector<LPCWSTR> args = {
-        fullPath.c_str(),
-        L"-E", wEntry.c_str(),
-        L"-T", wTarget.c_str(),
-        L"-HV", L"2021",
-        L"-Qstrip_reflect",
-    };
+    // A DXIL library (lib_6_*) exports all its [shader(...)] functions and must
+    // NOT be given a single entry point; everything else takes -E <entry>.
+    const bool isLibrary = wTarget.rfind(L"lib_", 0) == 0;
+
+    std::vector<LPCWSTR> args = { fullPath.c_str() };
+    if (!isLibrary) { args.push_back(L"-E"); args.push_back(wEntry.c_str()); }
+    args.push_back(L"-T"); args.push_back(wTarget.c_str());
+    args.push_back(L"-HV"); args.push_back(L"2021");
+    args.push_back(L"-Qstrip_reflect");
 #ifdef SGE_DEBUG
     args.push_back(L"-Zi");
     args.push_back(L"-Od");

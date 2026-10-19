@@ -18,6 +18,9 @@ public:
     // ResourceDescriptorHeap[] bindless access. Detected once at Initialize.
     bool                 SupportsBindless() const { return m_supportsBindless;   }
 
+    // True when the GPU supports DXR (raytracing tier 1.0+). Detected at Initialize.
+    bool                 SupportsRaytracing() const { return m_supportsRaytracing; }
+
 private:
     void SelectAdapter();
     void DetectCapabilities();
@@ -26,7 +29,8 @@ private:
     ComPtr<IDXGIAdapter1>      m_adapter;
     ComPtr<ID3D12Device>       m_device;
     ComPtr<ID3D12CommandQueue> m_commandQueue;
-    bool                       m_supportsBindless = false;
+    bool                       m_supportsBindless   = false;
+    bool                       m_supportsRaytracing = false;
 };
 
 } // namespace SGE

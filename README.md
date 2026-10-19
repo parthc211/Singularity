@@ -8,7 +8,7 @@ A from-scratch **DirectX 12** rendering & systems engine written in modern **C++
 
 ## Highlights
 
-The Sandbox app is a single executable hosting **24 interactive demos**, selectable at runtime from an ImGui dropdown:
+The Sandbox app is a single executable hosting **26 interactive demos**, selectable at runtime from an ImGui dropdown:
 
 | Demo | What it shows |
 |---|---|
@@ -28,6 +28,8 @@ The Sandbox app is a single executable hosting **24 interactive demos**, selecta
 | **SSAO** | Screen-space ambient occlusion over the deferred G-buffer |
 | **Screen-Space Reflections** | View-space G-buffer (colour+reflectivity / normal / position) + a resolve pass that reflects each view ray and ray-marches the depth buffer, compositing hits by reflectivity × Fresnel × edge fade — a reflective floor mirroring the objects, with the on-screen-only limitation visible |
 | **Order-Independent Transparency** | Weighted-blended OIT: overlapping translucent spheres accumulated into additive-colour + multiplicative-revealage targets (independent per-target blend) with depth-weighted weighting, composited over the opaque scene — correct at any draw order, with a naive-alpha A/B toggle |
+| **Ray Tracing (DXR)** | Hardware ray tracing of the shared cube + sphere meshes (BLAS per mesh, TLAS of instances) + a ray-tracing pipeline state object + shader binding table driving `DispatchRays` — primary rays, hard shadow rays, and recursive reflection rays that trace the *real* scene (so they show off-screen geometry SSR can't); the hit shader fetches vertices bindlessly |
+| **GPU-Driven Rendering** | 14k instances of the shared cube mesh frustum-culled by a compute pass that atomic-compacts surviving `DrawIndexedInstanced` commands into an indirect-args buffer, drawn by a single `ExecuteIndirect` — zero per-object CPU draws, with a live drawn/total read-back |
 | **Texture / Normal / PBR Mapping** | The material pipeline: sRGB albedo, tangent-space normal maps (TBN from baked tangents), parallax occlusion mapping with contact shadows (height in the normal map's alpha), and an ORM map driving a Cook-Torrance GGX BRDF; CPU-mipped WIC textures with a procedural brick fallback |
 | **Image-Based Lighting** | Compute-baked IBL from a procedural HDR sky: environment cube → irradiance cube (diffuse) + prefiltered-mip cube (specular) + BRDF LUT (split-sum). A roughness×metalness sphere grid lit entirely from the environment, under a skybox |
 | **Cascaded Shadow Maps** | 4-cascade CSM with bounding-sphere fit + texel snapping (stable, shimmer-free) |
@@ -39,7 +41,10 @@ The Sandbox app is a single executable hosting **24 interactive demos**, selecta
 ## Engine systems
 
 - **Renderer (DX12):** device/swap-chain/command-context bootstrap, root signatures, PSO management (MRT + tessellation capable), depth buffers, reusable render-target helpers (`GBuffer`, `ShadowMap`, `CascadedShadowMap`, `RenderTexture`), and sampled textures (`Texture2D`: WIC decoding, sRGB-aware CPU mip generation, staged DEFAULT-heap upload).
+- **Geometry resource:** `Mesh` uploads a vertex/index pair once into GPU-local (DEFAULT-heap) memory via a staged copy, ending in `GENERIC_READ`, and exposes its buffer views, GPU addresses, counts, stride and formats — so one asset (e.g. `cube.obj`) feeds the forward/deferred raster path, GPU-driven `ExecuteIndirect`, and DXR acceleration-structure builds + bindless hit-shader vertex fetch, instead of each path hand-authoring its own geometry.
 - **Bindless:** SM 6.6 `ResourceDescriptorHeap[]` support — `GraphicsDevice` detects it, `BindlessHeap` is a shader-visible CBV/SRV/UAV heap with a persistent index allocator, and a directly-indexed root signature lets shaders fetch any resource by integer with no per-draw descriptor tables (the basis for GPU-driven rendering and ray tracing).
+- **GPU-driven rendering:** a cull-and-draw-indirect path (`GpuDrivenScene`) — a compute pass tests each instance's bounding sphere against the six frustum planes and atomic-appends a `DrawIndexedInstanced` command (plus a per-draw root constant) into an indirect buffer, which one `ExecuteIndirect` renders through a command signature; a counter read-back reports how many survived. It draws instances of the shared `cube.obj` mesh — the same geometry resource the forward path uses — bound straight from the mesh's vertex/index views.
+- **Ray tracing (DXR):** a hardware ray tracer (`RtScene`) — the shared cube + sphere meshes are built into bottom-level acceleration structures straight from their VRAM vertex/index buffers, then instanced by a top-level AS with per-instance transforms and materials; a ray-tracing pipeline state object (ray-gen / closest-hit / two miss shaders, compiled as a `lib_6_6` DXIL library) and a shader binding table drive `DispatchRays`, tracing primary, hard-shadow and recursive reflection rays against the real acceleration structure. The single closest-hit shader fetches the hit mesh's vertices bindlessly (`ResourceDescriptorHeap[]`, indexed per-instance), so one hit group shades every instance. `GraphicsDevice` detects raytracing support and the DXC path gained `lib_6_*` compilation.
 - **Order-independent transparency:** weighted-blended OIT (`OitScene`) — transparent geometry accumulated into an additive colour buffer and a multiplicative revealage buffer via independent per-target blend states, depth-weighted so nearer surfaces dominate, then resolved over the opaque image; needs no sorting. Added blend-state and depth-test-without-write support to `GraphicsPipeline`.
 - **Screen-space reflections:** a view-space G-buffer + ray-march resolve (`SsrScene`) — reflects each pixel's view ray, marches it through the stored depth/position with an accelerating step and binary refinement, and composites the hit colour by reflectivity, Fresnel and a screen-edge fade.
 - **Clustered shading:** a froxel light-culling path (`ClusteredScene`) — a compute pass builds view-space froxel AABBs, a second atomic-appends overlapping lights into per-froxel index lists (bound as structured buffers via root descriptors), and a clustered forward pass reconstructs each pixel's froxel and loops only its lights, so cost tracks local light density rather than total count.
@@ -47,7 +52,7 @@ The Sandbox app is a single executable hosting **24 interactive demos**, selecta
 - **Post-processing:** a composable chain expressed as render-graph passes over an HDR target — a compute eye-adaptation pass (geometric-mean scene luminance adapted over time into a persistent 1×1 target), bloom (bright-pass + separable Gaussian ping-pong), and a composite applying ACES tonemap, analytic colour grading, vignette, chromatic aberration and film grain.
 - **Render graph:** a per-frame declarative pass scheduler (`RenderGraph`) — passes declare the state they need each resource in, and the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread, so barriers stop being hand-written per scene. Scheduling + culling are implemented (transient-resource memory aliasing is the planned Phase 2).
 - **Shaders:** compiled at runtime with **DXC** (SM 6.0); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
-- **Memory:** a GPU placed-resource allocator (`GpuHeap`) that real mesh vertex/index buffers sub-allocate from, plus four hand-written CPU allocators.
+- **Memory:** a GPU placed-resource allocator (`GpuHeap`) that skinned-mesh and tessellation vertex/index buffers sub-allocate from (static `Mesh` buffers get their own staged DEFAULT-heap home), plus four hand-written CPU allocators.
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
 - **IBL:** `IblEnvironment` bakes image-based lighting from a procedural HDR sky via compute — environment cube → cosine-convolved irradiance cube (diffuse) + GGX-prefiltered mip cube (specular) + a split-sum BRDF LUT — on a self-contained blocking command list, feeding a real ambient term into the PBR BRDF.
@@ -96,7 +101,7 @@ Singularity/
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 24 demo scenes
+    ├── Scenes/         # the 26 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
@@ -112,7 +117,7 @@ Singularity/
 **Portfolio polish (next up):**
 - [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
-- [ ] Demo reel — a short video walking all 24 scenes
+- [ ] Demo reel — a short video walking all 26 scenes
 
 **Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
 - [~] Render graph (frame graph) — **scheduling + culling done**: passes declare per-resource read/write states (`RenderGraph::Import`/`AddPass`/`Execute`), the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread. The `Render Graph` demo prints the live compiled schedule/barriers/culling; `DeferredScene` is migrated off manual `GBuffer::TransitionToX` calls. **Phase 2 (TODO):** graph-owned *transient* resources + lifetime-based memory aliasing (the `Import` API is the seam it slots into)
@@ -128,8 +133,8 @@ Singularity/
 - [x] Transparency / OIT — **weighted-blended OIT** (McGuire/Bavoil) in the `Order-Independent Transparency` demo: an opaque pass, then transparent geometry accumulated into additive-colour + multiplicative-revealage targets via independent per-target blend (depth-weighted), resolved over the opaque image — correct in any draw order, with a naive-alpha A/B toggle. Added `GraphicsPipeline` blend-state + depth-test-without-write support
 
 **Rendering — frontiers:**
-- [ ] DXR (hardware ray tracing) — BLAS/TLAS + shader binding table + ray-gen/hit/miss; ship RT shadows → reflections/AO → reference path tracer
-- [ ] GPU-driven rendering — `ExecuteIndirect` with GPU frustum/occlusion culling and draw-arg compaction (depends on bindless)
+- [~] DXR (hardware ray tracing) — **done:** the full pipeline in the `Ray Tracing (DXR)` demo — BLAS/TLAS build, a ray-tracing pipeline state object + shader binding table, and `DispatchRays` with primary + hard-shadow + recursive reflection rays (reflections trace the real scene, fixing SSR's off-screen limitation); `GraphicsDevice` detects raytracing tier, DXC gained a `lib_6_3` path. **TODO:** RT ambient occlusion; a hybrid pass (RT shadows/reflections over the rasterized G-buffer); a reference path tracer with accumulation
+- [~] GPU-driven rendering — **done:** the `GPU-Driven Rendering` demo — a compute pass frustum-culls 14k instances and atomic-compacts the surviving draws into an indirect-args buffer, issued by one `ExecuteIndirect` (via a command signature carrying a per-draw root constant), with a read-back drawn/total HUD. **TODO:** Hi-Z occlusion culling on top of frustum; bindless per-instance materials/meshes so a single indirect batch spans many meshes
 - [ ] Mesh shaders — meshlet clusters + amplification/mesh shader front-end with per-meshlet culling and LOD (Nanite-adjacent)
 - [ ] Dynamic GI — DDGI irradiance probes (or voxel cone tracing / screen-space GI) for indirect bounce
 - [ ] Volumetric fog / lighting — froxel in-scatter with shadow-map visibility, ray-marched into a screen texture (light shafts, god rays)

@@ -32,6 +32,10 @@ add_executable(Sandbox WIN32
     Scenes/SsrScene.cpp
     Scenes/OitScene.h
     Scenes/OitScene.cpp
+    Scenes/RtScene.h
+    Scenes/RtScene.cpp
+    Scenes/GpuDrivenScene.h
+    Scenes/GpuDrivenScene.cpp
     Scenes/SsaoScene.h
     Scenes/SsaoScene.cpp
     Scenes/NormalMapScene.h
