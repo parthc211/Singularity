@@ -114,6 +114,21 @@ void GraphicsDevice::DetectCapabilities()
         && opt5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0;
     LogInfo(m_supportsRaytracing ? "Raytracing (DXR) supported."
                                  : "Raytracing (DXR) NOT supported on this GPU/driver.");
+
+    // Mesh shaders: shader model 6.5 (the amplification/mesh-shader stages) plus
+    // mesh-shader tier 1. Requesting 6.5 lets the runtime clamp HighestShaderModel
+    // to the real maximum, so this is true on any GPU that actually supports them.
+    D3D12_FEATURE_DATA_SHADER_MODEL sm65 = { D3D_SHADER_MODEL_6_5 };
+    const bool haveSm65 =
+        SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm65, sizeof(sm65)))
+        && sm65.HighestShaderModel >= D3D_SHADER_MODEL_6_5;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS7 opt7 = {};
+    const bool meshTier =
+        SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &opt7, sizeof(opt7)))
+        && opt7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1;
+    m_supportsMeshShaders = haveSm65 && meshTier;
+    LogInfo(m_supportsMeshShaders ? "Mesh shaders supported (SM 6.5 + mesh-shader tier 1)."
+                                  : "Mesh shaders NOT supported on this GPU/driver.");
 }
 
 void GraphicsDevice::Shutdown()

@@ -40,6 +40,8 @@ public:
     bool                       SupportsBindless() const { return m_graphicsDevice.SupportsBindless(); }
     // DXR raytracing support (tier 1.0+).
     bool                       SupportsRaytracing() const { return m_graphicsDevice.SupportsRaytracing(); }
+    // Mesh-shader support (SM 6.5 + mesh-shader tier 1).
+    bool                       SupportsMeshShaders() const { return m_graphicsDevice.SupportsMeshShaders(); }
     // The single direct queue — needed by Texture2D's blocking staging upload.
     ID3D12CommandQueue*        GetCommandQueue() const;
     uint32_t                   GetFrameIndex()  const { return m_frameIndex; }

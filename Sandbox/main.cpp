@@ -29,6 +29,7 @@
 #include "Scenes/OitScene.h"
 #include "Scenes/RtScene.h"
 #include "Scenes/GpuDrivenScene.h"
+#include "Scenes/MeshShaderScene.h"
 #include "Scenes/SsaoScene.h"
 #include "Scenes/NormalMapScene.h"
 #include "Scenes/IblScene.h"
@@ -217,6 +218,7 @@ protected:
         m_scenes.Add(std::make_unique<OitScene>(&m_mesh, &m_sphereMesh));
         m_scenes.Add(std::make_unique<RtScene>(&m_mesh, &m_sphereMesh));
         m_scenes.Add(std::make_unique<GpuDrivenScene>());
+        m_scenes.Add(std::make_unique<MeshShaderScene>());
         m_scenes.Add(std::make_unique<SsaoScene>(&m_mesh));
         m_scenes.Add(std::make_unique<NormalMapScene>(&m_mesh));
         m_scenes.Add(std::make_unique<IblScene>(&m_sphereMesh));

@@ -21,6 +21,10 @@ public:
     // True when the GPU supports DXR (raytracing tier 1.0+). Detected at Initialize.
     bool                 SupportsRaytracing() const { return m_supportsRaytracing; }
 
+    // True when the GPU supports mesh shaders (SM 6.5 + mesh-shader tier 1), i.e.
+    // the amplification/mesh-shader geometry front end. Detected at Initialize.
+    bool                 SupportsMeshShaders() const { return m_supportsMeshShaders; }
+
 private:
     void SelectAdapter();
     void DetectCapabilities();
@@ -29,8 +33,9 @@ private:
     ComPtr<IDXGIAdapter1>      m_adapter;
     ComPtr<ID3D12Device>       m_device;
     ComPtr<ID3D12CommandQueue> m_commandQueue;
-    bool                       m_supportsBindless   = false;
-    bool                       m_supportsRaytracing = false;
+    bool                       m_supportsBindless    = false;
+    bool                       m_supportsRaytracing  = false;
+    bool                       m_supportsMeshShaders = false;
 };
 
 } // namespace SGE

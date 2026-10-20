@@ -106,6 +106,8 @@ add_library(SingularityEngine STATIC
     src/Renderer/DX12/GpuBuffer.cpp
     src/Renderer/DX12/GraphicsPipeline.h
     src/Renderer/DX12/GraphicsPipeline.cpp
+    src/Renderer/DX12/MeshPipeline.h
+    src/Renderer/DX12/MeshPipeline.cpp
     src/Renderer/DX12/VertexBuffer.h
     src/Renderer/DX12/VertexBuffer.cpp
     src/Renderer/DX12/IndexBuffer.h
@@ -114,6 +116,8 @@ add_library(SingularityEngine STATIC
     src/Renderer/DX12/Texture2D.cpp
     src/Renderer/Mesh.h
     src/Renderer/Mesh.cpp
+    src/Renderer/Meshlet.h
+    src/Renderer/Meshlet.cpp
     src/Renderer/SkinnedMesh.h
     src/Renderer/SkinnedMesh.cpp
     src/Renderer/MeshLoader.h
