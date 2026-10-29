@@ -2,7 +2,7 @@
 
 A from-scratch **DirectX 12** rendering & systems engine written in modern **C++20**, built as both a learning vehicle for explicit GPU APIs and a reusable, showcase-oriented foundation. Every core system — the SIMD math library, the CPU and GPU allocators, the renderer core, the ECS — is hand-written rather than pulled from a library, and each graphics technique ships as a self-contained, switchable demo scene with live ImGui controls.
 
-> **Namespace:** `SGE::` · **Toolchain:** CMake + MSVC (Visual Studio 2022, x64) · **Shader model:** SM 6.0 via runtime DXC compilation
+> **Namespace:** `SGE::` · **Toolchain:** CMake + MSVC (Visual Studio 2022, x64) · **Shader model:** SM 6.0–6.6 via runtime DXC compilation
 
 ---
 
@@ -53,7 +53,7 @@ The Sandbox app is a single executable hosting **27 interactive demos**, selecta
 - **Temporal AA:** a jittered-projection + motion-vector (`TaaScene`) pipeline — geometry writes colour and screen-space velocity (from un-jittered clip), and a resolve pass reprojects and neighbourhood-clamps a ping-ponged history buffer, so sub-pixel jitter accumulates into supersampled, stable edges.
 - **Post-processing:** a composable chain expressed as render-graph passes over an HDR target — a compute eye-adaptation pass (geometric-mean scene luminance adapted over time into a persistent 1×1 target), bloom (bright-pass + separable Gaussian ping-pong), and a composite applying ACES tonemap, analytic colour grading, vignette, chromatic aberration and film grain.
 - **Render graph:** a per-frame declarative pass scheduler (`RenderGraph`) — passes declare the state they need each resource in, and the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread, so barriers stop being hand-written per scene. Scheduling + culling are implemented (transient-resource memory aliasing is the planned Phase 2).
-- **Shaders:** compiled at runtime with **DXC** (SM 6.0); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
+- **Shaders:** compiled at runtime with **DXC** (SM 6.0 for most stages; mesh/amplification shaders at SM 6.5, the bindless + DXR libraries at SM 6.6); input layouts auto-reflected from the vertex shader; a `ShaderLibrary` hot-reloads shaders on file change.
 - **Memory:** a GPU placed-resource allocator (`GpuHeap`) that skinned-mesh and tessellation vertex/index buffers sub-allocate from (static `Mesh` buffers get their own staged DEFAULT-heap home), plus four hand-written CPU allocators.
 - **Math:** SIMD `Vec4`/`Mat4`/`Quat` (SSE + an AVX SoA path), conventions matching DirectXMath for free interop.
 - **Jobs:** a work-stealing thread pool (`JobSystem`) — per-worker deques, LIFO owner pop / FIFO stealing, a helping `Wait()` — used by threaded command recording and the physics step.
@@ -98,19 +98,19 @@ Singularity/
 │       ├── Memory/     # Arena / Stack / Pool / FreeList allocators
 │       ├── Physics/    # rigid bodies, narrowphase, solver, broadphase, joints
 │       ├── Profiling/  # GpuProfiler (timestamp queries), CpuProfiler
-│       ├── Renderer/   # Renderer, ShaderLibrary, Mesh/SkinnedMesh, ImageLoader, + DX12/, DXC/, RenderGraph/, IBL/
+│       ├── Renderer/   # Renderer, ShaderLibrary, Mesh/SkinnedMesh/Meshlet, ImageLoader, + DX12/, DXC/, RenderGraph/, IBL/
 │       ├── Scene/      # ECS (World/Entity/SparseSet), RenderSystem, SceneManager
 │       └── UI/         # ImGuiLayer
 └── Sandbox/            # Win32 executable
     ├── main.cpp        # shared GPU infra + scene registry + fly-camera
-    ├── Scenes/         # the 26 demo scenes
+    ├── Scenes/         # the 27 demo scenes
     ├── Shaders/        # HLSL (forward, deferred, tessellation, shadows, post, skinning, lines)
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
 
 ## Roadmap
 
-**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning) · renderer abstraction layer (`RootSignatureBuilder`, `SrvHeap`, one-call constant/vertex binding, back-buffer pass restore — all 16 scenes migrated).
+**Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning) · renderer abstraction layer (`RootSignatureBuilder`, `SrvHeap`, one-call constant/vertex binding, back-buffer pass restore — all scenes migrated).
 
 **Sample assets:** `CesiumMan.glb` (© Cesium, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and `Fox.glb` (© PixelMannen/tomkranis, CC-BY 4.0) from the [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) repository; `SimpleSkin` from the glTF 2.0 specification tutorials (CC-BY 4.0); `KenneyCharacter.fbx` (Kenney assets, CC0) and `maya_game_sausage_wiggle.fbx` from the [ufbx test suite](https://github.com/ufbx/ufbx).
 
@@ -119,7 +119,7 @@ Singularity/
 **Portfolio polish (next up):**
 - [ ] Screenshots/GIFs of the flagship demos in this README (deferred lighting, CSM, physics stacks, skeletal animation crowd)
 - [ ] Release-build benchmark numbers published here (SIMD vs DirectXMath, allocators vs `malloc`, serial-vs-JobSystem timings for physics / animation / command recording)
-- [ ] Demo reel — a short video walking all 26 scenes
+- [ ] Demo reel — a short video walking all 27 scenes
 
 **Engine architecture (highest-leverage — turns the demo collection into a unified engine):**
 - [~] Render graph (frame graph) — **scheduling + culling done**: passes declare per-resource read/write states (`RenderGraph::Import`/`AddPass`/`Execute`), the graph derives every barrier by diffing a cross-frame state cache (batched per pass) and reference-count culls passes whose outputs go unread. The `Render Graph` demo prints the live compiled schedule/barriers/culling; `DeferredScene` is migrated off manual `GBuffer::TransitionToX` calls. **Phase 2 (TODO):** graph-owned *transient* resources + lifetime-based memory aliasing (the `Import` API is the seam it slots into)
@@ -135,7 +135,7 @@ Singularity/
 - [x] Transparency / OIT — **weighted-blended OIT** (McGuire/Bavoil) in the `Order-Independent Transparency` demo: an opaque pass, then transparent geometry accumulated into additive-colour + multiplicative-revealage targets via independent per-target blend (depth-weighted), resolved over the opaque image — correct in any draw order, with a naive-alpha A/B toggle. Added `GraphicsPipeline` blend-state + depth-test-without-write support
 
 **Rendering — frontiers:**
-- [~] DXR (hardware ray tracing) — **done:** the full pipeline in the `Ray Tracing (DXR)` demo — BLAS/TLAS build, a ray-tracing pipeline state object + shader binding table, and `DispatchRays` with primary + hard-shadow + recursive reflection rays (reflections trace the real scene, fixing SSR's off-screen limitation); `GraphicsDevice` detects raytracing tier, DXC gained a `lib_6_3` path. **TODO:** RT ambient occlusion; a hybrid pass (RT shadows/reflections over the rasterized G-buffer); a reference path tracer with accumulation
+- [~] DXR (hardware ray tracing) — **done:** the full pipeline in the `Ray Tracing (DXR)` demo — BLAS/TLAS build, a ray-tracing pipeline state object + shader binding table, and `DispatchRays` with primary + hard-shadow + recursive reflection rays (reflections trace the real scene, fixing SSR's off-screen limitation); `GraphicsDevice` detects raytracing tier, DXC gained a `lib_6_6` path (the hit shader fetches vertices bindlessly). **TODO:** RT ambient occlusion; a hybrid pass (RT shadows/reflections over the rasterized G-buffer); a reference path tracer with accumulation
 - [~] GPU-driven rendering — **done:** the `GPU-Driven Rendering` demo — a compute pass frustum-culls 14k instances and atomic-compacts the surviving draws into an indirect-args buffer, issued by one `ExecuteIndirect` (via a command signature carrying a per-draw root constant), with a read-back drawn/total HUD. **TODO:** Hi-Z occlusion culling on top of frustum; bindless per-instance materials/meshes so a single indirect batch spans many meshes
 - [~] Mesh shaders — **done:** the `Mesh Shaders` demo — a CPU meshlet builder + a stream-based mesh-shader PSO run one `DispatchMesh` whose amplification shader frustum- and normal-cone-culls whole meshlets before a mesh shader expands the survivors (no input assembler / index buffer). **TODO:** per-meshlet LOD selection + a GPU-culled meshlet count read-back HUD
 - [ ] Dynamic GI — DDGI irradiance probes (or voxel cone tracing / screen-space GI) for indirect bounce
