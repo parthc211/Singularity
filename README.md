@@ -108,6 +108,21 @@ Singularity/
     └── Assets/         # cube.obj + Khronos glTF sample characters (see Roadmap)
 ```
 
+## Conventions
+
+Engineering rules that hold across the codebase — worth knowing before adding or changing a technique.
+
+- **Winding:** front faces are clockwise from outside (`FrontCounterClockwise = FALSE`). Author geometry CW-from-outside, or reuse a shared `Mesh` (`cube.obj`, `BuildUvSphere`) rather than rolling new geometry, so back-face culling stays correct.
+- **MVP upload:** don't `XMMatrixTranspose` before a constant-buffer upload — HLSL's column-major convention already transposes the row-major `XMMATRIX` implicitly.
+- **Per-frame order:** `Renderer::BeginFrame` runs before `ProcessMessages`, so the input system's just-pressed edges survive to the frame that reads them.
+- **Static geometry residency:** `Mesh` uploads vertex/index data into a DEFAULT (VRAM) heap and leaves it in `GENERIC_READ`, which serves the raster input assembler, `ExecuteIndirect`, acceleration-structure builds and structured-buffer reads without per-frame barriers; `SkinnedMesh` and tessellation buffers sub-allocate from the UPLOAD `GpuHeap` instead.
+- **Shader models:** most stages target SM 6.0; mesh/amplification shaders are `as_6_5`/`ms_6_5` and the bindless + DXR libraries are `lib_6_6`. Hardware-dependent paths query `Renderer::SupportsBindless` / `SupportsRaytracing` / `SupportsMeshShaders` and degrade to an in-panel message when unsupported.
+- **One technique, one scene:** each feature is a self-contained `DemoScene`, registered in `main.cpp`, composed through the render graph and timed by the profiler; shared meshes and the per-frame constant arena are injected via the constructor or `DemoContext`.
+
+## Current focus
+
+Near-term work builds directly on the geometry-resource and mesh-shader foundations: a read-back HUD and per-meshlet LOD for the mesh-shader path, and Hi-Z occlusion plus bindless multi-mesh batches for GPU-driven rendering. The larger structural step — the one that ties the demos into a single engine rather than a collection — is a unified scene + visibility system (a BVH/octree with frustum and Hi-Z culling). The Roadmap below tracks these alongside the rest of the backlog.
+
 ## Roadmap
 
 **Done:** tooling · SIMD math · CPU allocators · DX12 bootstrap · GPU-heap allocator · ECS · deferred rendering · tessellation · shadow mapping · cascaded shadow maps · HDR/bloom · SSAO · ImGui scene switcher · job system (work-stealing pool → parallel command-list recording) · rigid-body physics (impulse solver, stacking, joints) · texture & normal mapping (WIC loader, `Texture2D`, baked tangents) · skeletal animation (hand-written glTF 2.0 loader, keyframe sampling, GPU skinning) · renderer abstraction layer (`RootSignatureBuilder`, `SrvHeap`, one-call constant/vertex binding, back-buffer pass restore — all scenes migrated).
